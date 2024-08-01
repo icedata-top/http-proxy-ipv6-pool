@@ -1,35 +1,81 @@
 # Http Proxy IPv6 Pool
 
-Make every request from a separate IPv6 address.
+A HTTP proxy that makes every request from a random IPv6 address, with Proxy Authentication.
 
-https://zu1k.com/posts/tutorials/http-proxy-ipv6-pool/
+## Why?
 
-## Tutorial
+- You want a ton of IPv6 addresses for proxy, and
+- You want to expose this service to local containers so listening on `0.0.0.0` is required but are afraid of exposing the proxy directly on the Internet. And you not want to use the `host` network mode.
 
-Assuming you already have an entire IPv6 subnet routed to your server, for me I purchased [Vultr's server](https://www.vultr.com/?ref=9039594-8H) to get one.
+## Tutorial - Routing Setup
 
-Get your IPv6 subnet prefix and interface name, for me is `2001:19f0:6001:48e4::/64` and `enp1s0`.
+Assuming you already have an entire IPv6 subnet routed to your server. Or, use HE.net's Tunnelbroker to get a /64 or /48.
+
+A example of netplan for Tunnelbroker: `/etc/netplan/99-he-tunnel.yaml`
+
+```yaml
+network:
+  version: 2
+  tunnels:
+    he-ipv6:
+      mode: sit
+      remote: 209.51.161.14 <--- HE's NY4 server 
+      local: 192.3.187.235 <--- Your outbound IPv4 address
+      addresses:
+        - "2001:470:a::/48"
+      routes:
+        - to: default
+          via: "2001:470:a::1" <--- Should match your /48 or /64
+
+```
+
+Get your IPv6 subnet prefix and interface name, for me is `2001:470:a::/48` and `eth0`.
 
 ```sh
 $ ip a
 ......
-2: enp1s0: <BROADCAST,MULTICAST,ALLMULTI,UP,LOWER_UP> mtu 1500 qdisc fq state UP group default qlen 1000
-    ......
-    inet6 2001:19f0:6001:48e4:5400:3ff:fefa:a71d/64 scope global dynamic mngtmpaddr 
-       valid_lft 2591171sec preferred_lft 603971sec
-    ......
+2: eth0: <BROADCAST,MULTICAST,ALLMULTI,UP,LOWER_UP> mtu 1500 qdisc fq state UP group default qlen 1000
+    ...
+    inet6 fe80::216:3eff:fe7e:d3dd/64 scope link 
+       valid_lft forever preferred_lft forever
 ```
 
 Add route via default internet interface
 
 ```sh
-ip route add local 2001:19f0:6001:48e4::/64 dev enp1s0
+ip route add 2001:470:a::/48 dev eth0
 ```
 
 Open `ip_nonlocal_bind` for binding any IP address:
 
 ```sh
 sysctl net.ipv6.ip_nonlocal_bind=1
+```
+
+To further optimize performance: `vim /etc/sysctl.conf`
+
+```sh
+fs.inotify.max_user_watches = 524288
+net.ipv6.conf.all.proxy_ndp=1
+net.ipv6.conf.default.forwarding=1
+net.ipv6.conf.all.forwarding=1
+net.ipv6.ip_nonlocal_bind=1
+net.ipv4.ip_local_port_range=1024 64000
+net.ipv6.route.max_size=409600
+net.ipv4.tcp_max_syn_backlog=4096
+net.ipv6.neigh.default.gc_thresh3=102400
+kernel.threads-max=1200000
+vm.max_map_count=6000000
+kernel.pid_max=2000000
+net.core.default_qdisc = cake
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_fastopen = 3
+```
+
+Then
+
+```sh
+sysctl -p
 ```
 
 For IPv6 NDP, install `ndppd`:
@@ -44,12 +90,12 @@ then edit `/etc/ndppd.conf`:
 ```conf
 route-ttl 30000
 
-proxy <INTERFACE-NAME> {
+proxy eth0 {
     router no
     timeout 500
     ttl 30000
 
-    rule <IP6_SUBNET> {
+    rule 2001:470:a::/48 {
         static
     }
 }
@@ -74,10 +120,16 @@ $ curl --interface 2001:19f0:6001:48e4::2 ipv6.ip.sb
 
 Great!
 
-Finally, use the http proxy provided by this project:
+## Usage
 
 ```sh
-$ while true; do curl -x http://127.0.0.1:51080 ipv6.ip.sb; done
+http-proxy-ipv6-pool --listen 0.0.0.0:51080 --ipv6 2001:a:a:: --prefix-len 48  --username admin --password 123456
+```
+
+To test it out:
+
+```sh
+$ while true; do curl -x http://admin:123456@127.0.0.1:51080 ipv6.ip.sb; done
 2001:19f0:6001:48e4:971e:f12c:e2e7:d92a
 2001:19f0:6001:48e4:6d1c:90fe:ee79:1123
 2001:19f0:6001:48e4:f7b9:b506:99d7:1be9
@@ -92,6 +144,30 @@ $ while true; do curl -x http://127.0.0.1:51080 ipv6.ip.sb; done
 2001:19f0:6001:48e4:b598:409d:b946:17c
 ```
 
+### Register as service
+
+Copy the binary to `/usr/local/bin/http-proxy-ipv6-pool`;
+
+In file `/etc/systemd/system/http-proxy-ipv6-pool.service` -
+
+```
+[Unit]
+Description=HTTP Proxy IPv6 Pool Service
+After=network.target
+
+[Service]
+Environment="PROXY_ARGS=--listen 0.0.0.0:51080 --ipv6 2001:a:a:: --prefix-len 48  --username admin --password 123456"
+ExecStart=/usr/local/bin/http-proxy-ipv6-pool $PROXY_ARGS
+Restart=on-failure
+User=nobody
+Group=nogroup
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then `systemctl daemon-reload; systemctl start http-proxy-ipv6-pool.service`.
+
 ## Author
 
-**Http Proxy IPv6 Pool** © [zu1k](https://github.com/zu1k), Released under the [MIT](./LICENSE) License.
+**Http Proxy IPv6 Pool** © [zu1k](https://github.com/zu1k) and [Beining](https://github.com/cnbeining), Released under the [MIT](./LICENSE) License.

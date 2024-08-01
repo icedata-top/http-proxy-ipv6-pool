@@ -1,8 +1,10 @@
+use base64::Engine;
 use hyper::{
     client::HttpConnector,
+    header::{HeaderValue, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION},
     server::conn::AddrStream,
     service::{make_service_fn, service_fn},
-    Body, Client, Method, Request, Response, Server,
+    Body, Client, Method, Request, Response, Server, StatusCode,
 };
 use rand::Rng;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs};
@@ -14,15 +16,23 @@ use tokio::{
 pub async fn start_proxy(
     listen_addr: SocketAddr,
     (ipv6, prefix_len): (Ipv6Addr, u8),
+    username: String,
+    password: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let make_service = make_service_fn(move |_: &AddrStream| async move {
-        Ok::<_, hyper::Error>(service_fn(move |req| {
-            Proxy {
-                ipv6: ipv6.into(),
-                prefix_len,
-            }
-            .proxy(req)
-        }))
+    let make_service = make_service_fn(move |_: &AddrStream| {
+        let username = username.clone();
+        let password = password.clone();
+        async move {
+            Ok::<_, hyper::Error>(service_fn(move |req| {
+                let proxy = Proxy {
+                    ipv6: ipv6.into(),
+                    prefix_len,
+                    username: username.clone(),
+                    password: password.clone(),
+                };
+                proxy.proxy(req)
+            }))
+        }
     });
 
     Server::bind(&listen_addr)
@@ -37,10 +47,23 @@ pub async fn start_proxy(
 pub(crate) struct Proxy {
     pub ipv6: u128,
     pub prefix_len: u8,
+    pub username: String,
+    pub password: String,
 }
 
 impl Proxy {
     pub(crate) async fn proxy(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+        if !self.authenticate(&req) {
+            return Ok(Response::builder()
+                .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
+                .header(
+                    PROXY_AUTHENTICATE,
+                    HeaderValue::from_static("Basic realm=\"Proxy\""),
+                )
+                .body(Body::empty())
+                .unwrap());
+        }
+
         match if req.method() == Method::CONNECT {
             self.process_connect(req).await
         } else {
@@ -49,6 +72,25 @@ impl Proxy {
             Ok(resp) => Ok(resp),
             Err(e) => Err(e),
         }
+    }
+
+    fn authenticate(&self, req: &Request<Body>) -> bool {
+        if let Some(auth_header) = req.headers().get(PROXY_AUTHORIZATION) {
+            if let Ok(auth_str) = auth_header.to_str() {
+                if auth_str.starts_with("Basic ") {
+                    let credentials = auth_str.trim_start_matches("Basic ");
+                    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(credentials) {
+                        if let Ok(auth_string) = String::from_utf8(decoded) {
+                            let parts: Vec<&str> = auth_string.splitn(2, ':').collect();
+                            if parts.len() == 2 {
+                                return parts[0] == self.username && parts[1] == self.password;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     async fn process_connect(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {

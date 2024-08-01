@@ -1,13 +1,13 @@
 [package]
 name = "http-proxy-ipv6-pool"
-version = "0.1.0"
-edition = "2021"
-authors = ["zu1k <i@lgf.im>"]
+version = "0.1.1"
+edition = "2024.1"
+authors = ["zu1k <i@lgf.im>", "Beining <i@dz.ax>"]
 description = "Http proxy, every request from a separate IPv6 address."
 readme = "README.md"
 license = "MIT"
-homepage = "https://github.com/zu1k/http-proxy-ipv6-pool"
-repository = "https://github.com/zu1k/http-proxy-ipv6-pool"
+homepage = "https://github.com/cnbeining/http-proxy-ipv6-pool"
+repository = "https://github.com/cnbeining/http-proxy-ipv6-pool"
 
 
 [dependencies]
@@ -16,6 +16,8 @@ getopts = "0.2"
 hyper = { version = "0.14", features = ["client", "server", "http1", "runtime"] }
 tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "io-util"] }
 rand = "0.8"
+structopt = "0.3"
+base64 = "0.21"
 
 
 [profile.release]
