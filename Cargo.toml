@@ -1,7 +1,7 @@
 [package]
 name = "http-proxy-ipv6-pool"
 version = "0.1.1"
-edition = "2024.1"
+edition = "2021"
 authors = ["zu1k <i@lgf.im>", "Beining <i@dz.ax>"]
 description = "Http proxy, every request from a separate IPv6 address."
 readme = "README.md"
