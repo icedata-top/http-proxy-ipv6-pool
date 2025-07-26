@@ -188,6 +188,7 @@ impl Proxy {
 
         let mut http = HttpConnector::new();
         http.set_local_address(Some(bind_addr));
+        http.enforce_http(false); // Allow HTTPS connections
         
         let https = HttpsConnector::new_with_connector(http);
 
