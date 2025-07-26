@@ -39,7 +39,7 @@ jobs:
             ## Usage
 
             ```bash
-            http-proxy-ipv6-pool --listen 0.0.0.0:51080 --ipv6 2001:a:a:: --prefix-len 48 --username admin --password 123456
+            http-proxy-ipv6-pool --listen 0.0.0.0:51080 --ipv6 2001:a:a:: --prefix-len 48 --username <username> --password <password>
             ```
 
             For more details, see the [README](https://github.com/${{ github.repository }}/blob/master/README.md).
