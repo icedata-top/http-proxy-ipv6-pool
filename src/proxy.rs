@@ -6,6 +6,7 @@ use hyper::{
     server::conn::AddrStream,
     service::{make_service_fn, service_fn},
 };
+use hyper_tls::HttpsConnector;
 use rand::Rng;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use tokio::{
@@ -158,10 +159,9 @@ impl Proxy {
             parts.scheme = target_uri.scheme().cloned();
             parts.authority = target_uri.authority().cloned();
 
-            // If the original request doesn't have a path, use the target's path
-            if parts.path_and_query.is_none()
-                || parts.path_and_query.as_ref().unwrap().path() == "/"
-            {
+            // Keep the original request path, don't replace it with target path
+            // Only use target path if the original request has no path at all
+            if parts.path_and_query.is_none() {
                 if let Some(target_path) = target_uri.path_and_query() {
                     parts.path_and_query = Some(target_path.clone());
                 }
@@ -180,7 +180,7 @@ impl Proxy {
         };
 
         // Update the request URI
-        *req.uri_mut() = new_uri;
+        *req.uri_mut() = new_uri.clone();
 
         // Remove proxy-specific headers that shouldn't be forwarded
         req.headers_mut().remove(PROXY_AUTHORIZATION);
@@ -188,22 +188,36 @@ impl Proxy {
 
         let mut http = HttpConnector::new();
         http.set_local_address(Some(bind_addr));
-
-        println!(
-            "Reverse proxy: {} via {bind_addr} -> {target_url}",
-            req.uri()
-                .path_and_query()
-                .map(|pq| pq.as_str())
-                .unwrap_or("/")
-        );
+        
+        let https = HttpsConnector::new_with_connector(http);
 
         let client = Client::builder()
             .http1_title_case_headers(true)
             .http1_preserve_header_case(true)
-            .build(http);
+            .build(https);
 
-        let res = client.request(req).await?;
-        Ok(res)
+        println!(
+            "Reverse proxy: {} via {bind_addr} -> {}",
+            req.uri()
+                .path_and_query()
+                .map(|pq| pq.as_str())
+                .unwrap_or("/"),
+            new_uri
+        );
+
+        match client.request(req).await {
+            Ok(res) => {
+                println!("Response status: {}", res.status());
+                Ok(res)
+            }
+            Err(e) => {
+                eprintln!("Error forwarding request: {e}");
+                Ok(Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(Body::from(format!("Gateway error: {e}")))
+                    .unwrap())
+            }
+        }
     }
 
     async fn tunnel<A>(self, upgraded: &mut A, addr_str: String) -> std::io::Result<()>
