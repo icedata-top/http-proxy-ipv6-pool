@@ -79,7 +79,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: http-proxy-ipv6-pool
             asset_name: http-proxy-ipv6-pool-linux-x86_64
-          - os: ubuntu-latest
+          - os:  ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact_name: http-proxy-ipv6-pool
             asset_name: http-proxy-ipv6-pool-linux-aarch64
