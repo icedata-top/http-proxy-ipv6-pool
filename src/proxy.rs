@@ -144,7 +144,7 @@ impl Proxy {
         let target_uri = match target_url.parse::<hyper::Uri>() {
             Ok(uri) => uri,
             Err(e) => {
-                eprintln!("Invalid target URL: {}", e);
+                eprintln!("Invalid target URL: {e}");
                 return Ok(Response::builder()
                     .status(StatusCode::BAD_GATEWAY)
                     .body(Body::from("Invalid target URL configured"))
@@ -170,7 +170,7 @@ impl Proxy {
             match hyper::Uri::from_parts(parts) {
                 Ok(uri) => uri,
                 Err(e) => {
-                    eprintln!("Failed to construct target URI: {}", e);
+                    eprintln!("Failed to construct target URI: {e}");
                     return Ok(Response::builder()
                         .status(StatusCode::BAD_GATEWAY)
                         .body(Body::from("Failed to construct target URI"))
