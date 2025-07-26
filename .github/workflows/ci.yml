@@ -6,6 +6,9 @@ on:
   release:
     types: [created]
 
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -133,7 +136,7 @@ jobs:
 
   release:
     name: Release
-    needs: [test, build]
+    needs: [test, security_audit, build]
     runs-on: ubuntu-latest
     if: github.event_name == 'release' && github.event.action == 'created'
     steps:
@@ -147,7 +150,7 @@ jobs:
       - name: Display structure of downloaded files
         run: ls -la artifacts/
 
-      - name: Upload Everything to release
+      - name: Upload Linux x86_64 binary to release
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
