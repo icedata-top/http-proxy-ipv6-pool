@@ -185,19 +185,20 @@ impl Proxy {
         // Remove proxy-specific headers that shouldn't be forwarded
         req.headers_mut().remove(PROXY_AUTHORIZATION);
         req.headers_mut().remove("proxy-connection");
-        
+
         // Set the Host header to match the target authority
         if let Some(authority) = target_uri.authority() {
             req.headers_mut().insert(
                 hyper::header::HOST,
-                HeaderValue::from_str(authority.as_str()).unwrap_or_else(|_| HeaderValue::from_static("localhost"))
+                HeaderValue::from_str(authority.as_str())
+                    .unwrap_or_else(|_| HeaderValue::from_static("localhost")),
             );
         }
 
         let mut http = HttpConnector::new();
         http.set_local_address(Some(bind_addr));
         http.enforce_http(false); // Allow HTTPS connections
-        
+
         let https = HttpsConnector::new_with_connector(http);
 
         let client = Client::builder()
@@ -212,7 +213,10 @@ impl Proxy {
                 .map(|pq| pq.as_str())
                 .unwrap_or("/"),
             new_uri,
-            req.headers().get(hyper::header::HOST).map(|h| h.to_str().unwrap_or("invalid")).unwrap_or("none")
+            req.headers()
+                .get(hyper::header::HOST)
+                .map(|h| h.to_str().unwrap_or("invalid"))
+                .unwrap_or("none")
         );
 
         match client.request(req).await {
