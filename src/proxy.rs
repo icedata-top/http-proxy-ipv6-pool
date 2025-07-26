@@ -18,10 +18,13 @@ pub async fn start_proxy(
     (ipv6, prefix_len): (Ipv6Addr, u8),
     username: String,
     password: String,
+    reverse_proxy: bool,
+    target: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let make_service = make_service_fn(move |_: &AddrStream| {
         let username = username.clone();
         let password = password.clone();
+        let target = target.clone();
         async move {
             Ok::<_, hyper::Error>(service_fn(move |req| {
                 let proxy = Proxy {
@@ -29,6 +32,8 @@ pub async fn start_proxy(
                     prefix_len,
                     username: username.clone(),
                     password: password.clone(),
+                    reverse_proxy,
+                    target: target.clone(),
                 };
                 proxy.proxy(req)
             }))
@@ -49,11 +54,15 @@ pub(crate) struct Proxy {
     pub prefix_len: u8,
     pub username: String,
     pub password: String,
+    pub reverse_proxy: bool,
+    pub target: Option<String>,
 }
 
 impl Proxy {
     pub(crate) async fn proxy(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
-        if !self.authenticate(&req) {
+        // In reverse proxy mode, we don't require authentication from clients
+        // as we're acting as a reverse proxy to a backend server
+        if !self.reverse_proxy && !self.authenticate(&req) {
             return Ok(Response::builder()
                 .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
                 .header(
@@ -64,13 +73,19 @@ impl Proxy {
                 .unwrap());
         }
 
-        match if req.method() == Method::CONNECT {
-            self.process_connect(req).await
+        if self.reverse_proxy {
+            // In reverse proxy mode, forward all requests to the target server
+            self.process_reverse_proxy_request(req).await
         } else {
-            self.process_request(req).await
-        } {
-            Ok(resp) => Ok(resp),
-            Err(e) => Err(e),
+            // Original forward proxy behavior
+            match if req.method() == Method::CONNECT {
+                self.process_connect(req).await
+            } else {
+                self.process_request(req).await
+            } {
+                Ok(resp) => Ok(resp),
+                Err(e) => Err(e),
+            }
         }
     }
 
@@ -112,6 +127,69 @@ impl Proxy {
             .http1_title_case_headers(true)
             .http1_preserve_header_case(true)
             .build(http);
+        let res = client.request(req).await?;
+        Ok(res)
+    }
+
+    async fn process_reverse_proxy_request(self, mut req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+        let target_url = self.target.as_ref().unwrap();
+        let bind_addr = get_rand_ipv6(self.ipv6, self.prefix_len);
+        
+        // Parse the target URL to extract scheme, host, and port
+        let target_uri = match target_url.parse::<hyper::Uri>() {
+            Ok(uri) => uri,
+            Err(e) => {
+                eprintln!("Invalid target URL: {}", e);
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(Body::from("Invalid target URL configured"))
+                    .unwrap());
+            }
+        };
+
+        // Build new URI by combining target host with request path
+        let new_uri = {
+            let mut parts = req.uri().clone().into_parts();
+            parts.scheme = target_uri.scheme().cloned();
+            parts.authority = target_uri.authority().cloned();
+            
+            // If the original request doesn't have a path, use the target's path
+            if parts.path_and_query.is_none() || parts.path_and_query.as_ref().unwrap().path() == "/" {
+                if let Some(target_path) = target_uri.path_and_query() {
+                    parts.path_and_query = Some(target_path.clone());
+                }
+            }
+            
+            match hyper::Uri::from_parts(parts) {
+                Ok(uri) => uri,
+                Err(e) => {
+                    eprintln!("Failed to construct target URI: {}", e);
+                    return Ok(Response::builder()
+                        .status(StatusCode::BAD_GATEWAY)
+                        .body(Body::from("Failed to construct target URI"))
+                        .unwrap());
+                }
+            }
+        };
+
+        // Update the request URI
+        *req.uri_mut() = new_uri;
+
+        // Remove proxy-specific headers that shouldn't be forwarded
+        req.headers_mut().remove(PROXY_AUTHORIZATION);
+        req.headers_mut().remove("proxy-connection");
+
+        let mut http = HttpConnector::new();
+        http.set_local_address(Some(bind_addr));
+        
+        println!("Reverse proxy: {} via {bind_addr} -> {target_url}", 
+                 req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/"));
+
+        let client = Client::builder()
+            .http1_title_case_headers(true)
+            .http1_preserve_header_case(true)
+            .build(http);
+            
         let res = client.request(req).await?;
         Ok(res)
     }
