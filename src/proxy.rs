@@ -180,7 +180,7 @@ impl Proxy {
         };
 
         // Update the request URI
-        *req.uri_mut() = new_uri;
+        *req.uri_mut() = new_uri.clone();
 
         // Remove proxy-specific headers that shouldn't be forwarded
         req.headers_mut().remove(PROXY_AUTHORIZATION);
