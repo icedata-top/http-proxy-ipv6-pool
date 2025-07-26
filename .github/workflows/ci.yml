@@ -79,7 +79,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: http-proxy-ipv6-pool
             asset_name: http-proxy-ipv6-pool-linux-x86_64
-          - os: ubuntu-latest
+          - os:  ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact_name: http-proxy-ipv6-pool
             asset_name: http-proxy-ipv6-pool-linux-aarch64
@@ -109,6 +109,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt install -y libssl-dev pkg-config
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
       - name: Cache cargo dependencies
