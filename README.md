@@ -1,11 +1,26 @@
 # Http Proxy IPv6 Pool
 
-A HTTP proxy that makes every request from a random IPv6 address, with Proxy Authentication.
+A HTTP proxy that makes every request from a random IPv6 address, with Proxy Authentication. Now supports both forward proxy and reverse proxy modes.
 
 ## Why?
 
 - You want a ton of IPv6 addresses for proxy, and
 - You want to expose this service to local containers so listening on `0.0.0.0` is required but are afraid of exposing the proxy directly on the Internet. And you not want to use the `host` network mode.
+
+## Modes
+
+### Forward Proxy Mode (Original)
+- Acts as a traditional HTTP proxy
+- Clients connect with proxy authentication
+- Each client request uses a different IPv6 address
+- Supports CONNECT method for HTTPS tunneling
+
+### Reverse Proxy Mode (New)
+- Acts as a reverse proxy to a specific target server
+- No client authentication required
+- All incoming requests are forwarded to the target server
+- Each forwarded request uses a different IPv6 address
+- Perfect for load balancing or anonymizing requests to a single service
 
 ## Tutorial - Routing Setup
 
@@ -122,6 +137,8 @@ Great!
 
 ## Usage
 
+### Forward Proxy Mode (Original)
+
 ```sh
 http-proxy-ipv6-pool --listen 0.0.0.0:51080 --ipv6 2001:a:a:: --prefix-len 48  --username admin --password 123456
 ```
@@ -144,9 +161,35 @@ $ while true; do curl -x http://admin:123456@127.0.0.1:51080 ipv6.ip.sb; done
 2001:19f0:6001:48e4:b598:409d:b946:17c
 ```
 
+### Reverse Proxy Mode (New)
+
+Use the reverse proxy mode to forward all incoming requests to a target server, with each request originating from a different IPv6 address:
+
+```sh
+http-proxy-ipv6-pool --bind 0.0.0.0:8080 --ipv6-subnet 2001:a:a::/48 --auth admin:123456 --reverse-proxy --target https://ipv6.ip.sb
+```
+
+To test the reverse proxy:
+
+```sh
+$ curl http://127.0.0.1:8080/
+2001:19f0:6001:48e4:a1b2:c3d4:e5f6:7890
+
+$ curl http://127.0.0.1:8080/
+2001:19f0:6001:48e4:1a2b:3c4d:5e6f:7890
+```
+
+In reverse proxy mode:
+- Each request to your proxy will be forwarded to the target server
+- Each request uses a different random IPv6 address from your pool
+- No proxy authentication is required from clients (the proxy acts transparently)
+- All HTTP methods and paths are supported
+
 ### Register as service
 
 Copy the binary to `/usr/local/bin/http-proxy-ipv6-pool`;
+
+**For Forward Proxy Mode:**
 
 In file `/etc/systemd/system/http-proxy-ipv6-pool.service` -
 
@@ -166,8 +209,28 @@ Group=nogroup
 WantedBy=multi-user.target
 ```
 
+**For Reverse Proxy Mode:**
+
+In file `/etc/systemd/system/http-proxy-ipv6-pool.service` -
+
+```
+[Unit]
+Description=HTTP Proxy IPv6 Pool Service (Reverse Proxy)
+After=network.target
+
+[Service]
+Environment="PROXY_ARGS=--bind 0.0.0.0:8080 --ipv6-subnet 2001:a:a::/48 --auth admin:123456 --reverse-proxy --target https://ipv6.ip.sb"
+ExecStart=/usr/local/bin/http-proxy-ipv6-pool $PROXY_ARGS
+Restart=on-failure
+User=nobody
+Group=nogroup
+
+[Install]
+WantedBy=multi-user.target
+```
+
 Then `systemctl daemon-reload; systemctl start http-proxy-ipv6-pool.service`.
 
 ## Author
 
-**Http Proxy IPv6 Pool** © [zu1k](https://github.com/zu1k) and [Beining](https://github.com/cnbeining), Released under the [MIT](./LICENSE) License.
+**Http Proxy IPv6 Pool** © [zu1k](https://github.com/zu1k) and [Beining](https://github.com/cnbeining) and [Ovler](https://github.com/Ovler-Young), Released under the [MIT](./LICENSE) License.

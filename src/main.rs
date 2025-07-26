@@ -17,6 +17,14 @@ struct Opt {
     /// Proxy authentication in format username:password
     #[structopt(short = "a", long = "auth", parse(try_from_str = parse_auth))]
     auth: (String, String),
+
+    /// Enable reverse proxy mode
+    #[structopt(short = "r", long = "reverse-proxy")]
+    reverse_proxy: bool,
+
+    /// Target server for reverse proxy (e.g. https://ipv6.ip.sb)
+    #[structopt(short = "t", long = "target")]
+    target: Option<String>,
 }
 
 fn parse_ipv6_cidr(s: &str) -> Result<(Ipv6Addr, u8), Box<dyn std::error::Error>> {
@@ -47,5 +55,18 @@ fn parse_auth(s: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opt = Opt::from_args();
-    proxy::start_proxy(opt.bind, opt.ipv6_subnet, opt.auth.0, opt.auth.1).await
+    
+    // Validate reverse proxy options
+    if opt.reverse_proxy && opt.target.is_none() {
+        return Err("Target server is required when using reverse proxy mode. Use --target to specify the server.".into());
+    }
+    
+    proxy::start_proxy(
+        opt.bind, 
+        opt.ipv6_subnet, 
+        opt.auth.0, 
+        opt.auth.1,
+        opt.reverse_proxy,
+        opt.target
+    ).await
 }
