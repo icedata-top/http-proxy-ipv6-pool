@@ -3,6 +3,8 @@ name: CI
 on:
   push:
   pull_request:
+  release:
+    types: [created]
 
 env:
   CARGO_TERM_COLOR: always
@@ -128,3 +130,33 @@ jobs:
           name: ${{ matrix.asset_name }}
           path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
           if-no-files-found: error
+
+  release:
+    name: Release
+    needs: [test, security_audit, build]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release' && github.event.action == 'created'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          cp artifacts/http-proxy-ipv6-pool-linux-x86_64/http-proxy-ipv6-pool release-assets/http-proxy-ipv6-pool-linux-x86_64
+          cp artifacts/http-proxy-ipv6-pool-linux-aarch64/http-proxy-ipv6-pool release-assets/http-proxy-ipv6-pool-linux-aarch64
+          cp artifacts/http-proxy-ipv6-pool-windows-x86_64.exe/http-proxy-ipv6-pool.exe release-assets/http-proxy-ipv6-pool-windows-x86_64.exe
+          cp artifacts/http-proxy-ipv6-pool-macos-x86_64/http-proxy-ipv6-pool release-assets/http-proxy-ipv6-pool-macos-x86_64
+          cp artifacts/http-proxy-ipv6-pool-macos-aarch64/http-proxy-ipv6-pool release-assets/http-proxy-ipv6-pool-macos-aarch64
+          ls -la release-assets/
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
