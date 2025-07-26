@@ -1,10 +1,10 @@
 use base64::Engine;
 use hyper::{
+    Body, Client, Method, Request, Response, Server, StatusCode,
     client::HttpConnector,
     header::{HeaderValue, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION},
     server::conn::AddrStream,
     service::{make_service_fn, service_fn},
-    Body, Client, Method, Request, Response, Server, StatusCode,
 };
 use rand::Rng;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs};
@@ -94,7 +94,9 @@ impl Proxy {
             if let Ok(auth_str) = auth_header.to_str() {
                 if auth_str.starts_with("Basic ") {
                     let credentials = auth_str.trim_start_matches("Basic ");
-                    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(credentials) {
+                    if let Ok(decoded) =
+                        base64::engine::general_purpose::STANDARD.decode(credentials)
+                    {
                         if let Ok(auth_string) = String::from_utf8(decoded) {
                             let parts: Vec<&str> = auth_string.splitn(2, ':').collect();
                             if parts.len() == 2 {
@@ -131,10 +133,13 @@ impl Proxy {
         Ok(res)
     }
 
-    async fn process_reverse_proxy_request(self, mut req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+    async fn process_reverse_proxy_request(
+        self,
+        mut req: Request<Body>,
+    ) -> Result<Response<Body>, hyper::Error> {
         let target_url = self.target.as_ref().unwrap();
         let bind_addr = get_rand_ipv6(self.ipv6, self.prefix_len);
-        
+
         // Parse the target URL to extract scheme, host, and port
         let target_uri = match target_url.parse::<hyper::Uri>() {
             Ok(uri) => uri,
@@ -152,14 +157,16 @@ impl Proxy {
             let mut parts = req.uri().clone().into_parts();
             parts.scheme = target_uri.scheme().cloned();
             parts.authority = target_uri.authority().cloned();
-            
+
             // If the original request doesn't have a path, use the target's path
-            if parts.path_and_query.is_none() || parts.path_and_query.as_ref().unwrap().path() == "/" {
+            if parts.path_and_query.is_none()
+                || parts.path_and_query.as_ref().unwrap().path() == "/"
+            {
                 if let Some(target_path) = target_uri.path_and_query() {
                     parts.path_and_query = Some(target_path.clone());
                 }
             }
-            
+
             match hyper::Uri::from_parts(parts) {
                 Ok(uri) => uri,
                 Err(e) => {
@@ -181,15 +188,20 @@ impl Proxy {
 
         let mut http = HttpConnector::new();
         http.set_local_address(Some(bind_addr));
-        
-        println!("Reverse proxy: {} via {bind_addr} -> {target_url}", 
-                 req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/"));
+
+        println!(
+            "Reverse proxy: {} via {bind_addr} -> {target_url}",
+            req.uri()
+                .path_and_query()
+                .map(|pq| pq.as_str())
+                .unwrap_or("/")
+        );
 
         let client = Client::builder()
             .http1_title_case_headers(true)
             .http1_preserve_header_case(true)
             .build(http);
-            
+
         let res = client.request(req).await?;
         Ok(res)
     }
