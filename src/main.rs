@@ -14,9 +14,9 @@ struct Opt {
     #[structopt(short = "i", long = "ipv6-subnet", parse(try_from_str = parse_ipv6_cidr))]
     ipv6_subnet: (Ipv6Addr, u8),
 
-    /// Proxy authentication in format username:password
+    /// Proxy authentication in format username:password (required for forward proxy mode)
     #[structopt(short = "a", long = "auth", parse(try_from_str = parse_auth))]
-    auth: (String, String),
+    auth: Option<(String, String)>,
 
     /// Enable reverse proxy mode
     #[structopt(short = "r", long = "reverse-proxy")]
@@ -61,11 +61,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Target server is required when using reverse proxy mode. Use --target to specify the server.".into());
     }
 
+    // Validate authentication options
+    if !opt.reverse_proxy && opt.auth.is_none() {
+        return Err(
+            "Authentication is required for forward proxy mode. Use --auth username:password"
+                .into(),
+        );
+    }
+
+    let (username, password) = opt.auth.unwrap_or_else(|| ("".to_string(), "".to_string()));
+
     proxy::start_proxy(
         opt.bind,
         opt.ipv6_subnet,
-        opt.auth.0,
-        opt.auth.1,
+        username,
+        password,
         opt.reverse_proxy,
         opt.target,
     )
