@@ -1,5 +1,5 @@
-use std::net::{Ipv6Addr, SocketAddr};
 use clap::Parser;
+use std::net::{Ipv6Addr, SocketAddr};
 
 mod proxy;
 
