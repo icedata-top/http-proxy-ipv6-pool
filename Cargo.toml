@@ -13,10 +13,10 @@ repository = "https://github.com/cnbeining/http-proxy-ipv6-pool"
 [dependencies]
 cidr = "0.2"
 getopts = "0.2"
-hyper = { version = "0.14", features = ["client", "server", "http1", "runtime"] }
-tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "io-util"] }
+hyper = { version = "0.14.31", features = ["client", "server", "http1", "runtime"] }
+tokio = { version = "1.42", features = ["net", "rt-multi-thread", "macros", "io-util"] }
 rand = "0.8"
-structopt = "0.3"
+clap = { version = "4", features = ["derive"] }
 base64 = "0.21"
 
 
