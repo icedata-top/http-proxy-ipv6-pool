@@ -6,6 +6,7 @@ use std::{
 use tokio::sync::RwLock;
 
 mod auth;
+mod biliproxy;
 mod controller;
 mod proxy;
 
@@ -31,6 +32,14 @@ struct Opt {
     /// Proxy authentication in format username:password
     #[arg(short = 'a', long = "auth", value_parser = parse_auth)]
     auth: (String, String),
+
+    /// Bind address for biliproxy (optional, e.g. 127.0.0.1:3000)
+    #[arg(long = "biliproxy")]
+    biliproxy: Option<SocketAddr>,
+
+    /// Bilibili SESSDATA cookie for authenticated requests (optional)
+    #[arg(long = "sessdata", env = "BILIBILI_SESSDATA")]
+    sessdata: Option<String>,
 }
 
 fn parse_ipv6_cidr(s: &str) -> Result<(Ipv6Addr, u8), String> {
@@ -139,9 +148,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // Start biliproxy (optional)
+    let biliproxy_server = {
+        let biliproxy_addr = opt.biliproxy;
+        let sessdata = opt.sessdata;
+        async move {
+            if let Some(addr) = biliproxy_addr {
+                biliproxy::start_biliproxy(addr, sessdata)
+                    .await
+                    .map_err(|e| e.to_string())
+            } else {
+                Ok(())
+            }
+        }
+    };
+
     // Run all services concurrently - use try_join for better error handling
     // This will return immediately when any service fails
-    tokio::try_join!(random_proxy, stable_proxy, controller_server)?;
+    tokio::try_join!(
+        random_proxy,
+        stable_proxy,
+        controller_server,
+        biliproxy_server
+    )?;
 
     Ok(())
 }
