@@ -19,6 +19,9 @@ use hyper::{
 use lazy_static::lazy_static;
 use md5::{Digest, Md5};
 use parking_lot::RwLock;
+use prometheus::{
+    Encoder, HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry, TextEncoder,
+};
 use rand::Rng;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -73,6 +76,31 @@ lazy_static! {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
     ];
+
+    /// Prometheus metrics registry
+    static ref METRICS_REGISTRY: Registry = Registry::new();
+
+    /// HTTP request duration histogram
+    static ref HTTP_REQUEST_DURATION_MS: HistogramVec = {
+        let opts = HistogramOpts::new(
+            "biliproxy_http_request_duration_ms",
+            "HTTP request duration in milliseconds"
+        ).buckets(vec![10.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0]);
+        let histogram = HistogramVec::new(opts, &["method", "route", "status"]).unwrap();
+        METRICS_REGISTRY.register(Box::new(histogram.clone())).unwrap();
+        histogram
+    };
+
+    /// HTTP response bytes counter
+    static ref HTTP_RESPONSE_BYTES_TOTAL: IntCounterVec = {
+        let opts = Opts::new(
+            "biliproxy_http_response_bytes_total",
+            "Total HTTP response bytes"
+        );
+        let counter = IntCounterVec::new(opts, &["method", "route", "status"]).unwrap();
+        METRICS_REGISTRY.register(Box::new(counter.clone())).unwrap();
+        counter
+    };
 }
 
 /// WBI keys structure
@@ -571,8 +599,59 @@ fn parse_query_string(query: Option<&str>) -> HashMap<String, String> {
     params
 }
 
-/// Handle incoming requests
+/// Normalize route for metrics (avoid high cardinality)
+fn normalize_route(path: &str) -> &str {
+    if path.starts_with("/cover/") {
+        "/cover"
+    } else if path.starts_with("/apivc") {
+        "/apivc"
+    } else if path.starts_with("/https://") || path.starts_with("/http://") {
+        "/external"
+    } else if path.starts_with("/x/") {
+        // Keep first two segments for Bilibili API routes
+        path.split('/').take(3).collect::<Vec<_>>().join("/").leak()
+    } else {
+        path
+    }
+}
+
+/// Handle incoming requests with metrics
 async fn handle_request(
+    req: Request<Body>,
+    state: Arc<BiliproxyState>,
+) -> Result<Response<Body>, hyper::Error> {
+    let start = Instant::now();
+    let method_str = req.method().to_string();
+    let path = req.uri().path().to_string();
+    let route = normalize_route(&path).to_string();
+
+    let response = handle_request_inner(req, state).await;
+
+    // Record metrics
+    if let Ok(ref resp) = response {
+        let status = resp.status().as_u16().to_string();
+        let duration_ms = start.elapsed().as_millis() as f64;
+
+        HTTP_REQUEST_DURATION_MS
+            .with_label_values(&[&method_str, &route, &status])
+            .observe(duration_ms);
+
+        if let Some(content_length) = resp.headers().get("content-length") {
+            if let Ok(len_str) = content_length.to_str() {
+                if let Ok(len) = len_str.parse::<u64>() {
+                    HTTP_RESPONSE_BYTES_TOTAL
+                        .with_label_values(&[&method_str, &route, &status])
+                        .inc_by(len);
+                }
+            }
+        }
+    }
+
+    response
+}
+
+/// Internal request handler
+async fn handle_request_inner(
     req: Request<Body>,
     state: Arc<BiliproxyState>,
 ) -> Result<Response<Body>, hyper::Error> {
@@ -641,6 +720,18 @@ async fn handle_request(
                 },
             )),
         },
+
+        (Method::GET, "/metrics") => {
+            let encoder = TextEncoder::new();
+            let metric_families = METRICS_REGISTRY.gather();
+            let mut buffer = Vec::new();
+            encoder.encode(&metric_families, &mut buffer).unwrap();
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, encoder.format_type())
+                .body(Body::from(buffer))
+                .unwrap())
+        }
 
         (Method::GET, "/robots.txt") => Ok(Response::builder()
             .status(StatusCode::OK)

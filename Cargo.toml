@@ -29,6 +29,7 @@ regex = "1"
 lazy_static = "1.4"
 hex = "0.4"
 urlencoding = "2"
+prometheus = "0.13"
 
 
 [profile.release]
