@@ -1,7 +1,6 @@
-use base64::Engine;
 use hyper::{
     Body, Method, Request, Response, Server, StatusCode,
-    header::{AUTHORIZATION, HeaderValue, WWW_AUTHENTICATE},
+    header::{HeaderValue, WWW_AUTHENTICATE},
     service::{make_service_fn, service_fn},
 };
 use rand::Rng;
@@ -11,6 +10,8 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::RwLock;
+
+use crate::auth;
 
 /// Shared state for the stable IPv6 address
 pub type StableIpv6State = Arc<RwLock<Ipv6Addr>>;
@@ -73,25 +74,6 @@ pub async fn start_controller(
         .map_err(|e| e.into())
 }
 
-fn authenticate(req: &Request<Body>, username: &str, password: &str) -> bool {
-    if let Some(auth_header) = req.headers().get(AUTHORIZATION) {
-        if let Ok(auth_str) = auth_header.to_str() {
-            if auth_str.starts_with("Basic ") {
-                let credentials = auth_str.trim_start_matches("Basic ");
-                if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(credentials) {
-                    if let Ok(auth_string) = String::from_utf8(decoded) {
-                        let parts: Vec<&str> = auth_string.splitn(2, ':').collect();
-                        if parts.len() == 2 {
-                            return parts[0] == username && parts[1] == password;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
 async fn handle_request(
     req: Request<Body>,
     state: StableIpv6State,
@@ -100,8 +82,8 @@ async fn handle_request(
     username: String,
     password: String,
 ) -> Result<Response<Body>, hyper::Error> {
-    // Check authentication
-    if !authenticate(&req, &username, &password) {
+    // Check authentication using shared auth module
+    if !auth::authenticate_basic(&req, "authorization", &username, &password) {
         return Ok(Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header(
@@ -194,7 +176,13 @@ async fn handle_request(
 }
 
 fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Body> {
-    let json = serde_json::to_string(body).unwrap_or_else(|_| "{}".to_string());
+    let json = match serde_json::to_string(body) {
+        Ok(json) => json,
+        Err(e) => {
+            eprintln!("Failed to serialize JSON response: {}", e);
+            "{}".to_string()
+        }
+    };
     Response::builder()
         .status(status)
         .header("Content-Type", "application/json")

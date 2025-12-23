@@ -1,8 +1,7 @@
-use base64::Engine;
 use hyper::{
     Body, Client, Method, Request, Response, Server, StatusCode,
     client::HttpConnector,
-    header::{HeaderValue, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION},
+    header::{HeaderValue, PROXY_AUTHENTICATE},
     server::conn::AddrStream,
     service::{make_service_fn, service_fn},
 };
@@ -16,6 +15,8 @@ use tokio::{
     net::TcpSocket,
     sync::RwLock,
 };
+
+use crate::auth;
 
 pub async fn start_proxy(
     listen_addr: SocketAddr,
@@ -39,6 +40,7 @@ pub async fn start_proxy(
         }
     });
 
+    println!("Random proxy listening on {}", listen_addr);
     Server::bind(&listen_addr)
         .http1_preserve_header_case(true)
         .http1_title_case_headers(true)
@@ -57,7 +59,7 @@ pub(crate) struct Proxy {
 
 impl Proxy {
     pub(crate) async fn proxy(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
-        if !self.authenticate(&req) {
+        if !auth::authenticate_basic(&req, "proxy-authorization", &self.username, &self.password) {
             return Ok(Response::builder()
                 .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
                 .header(
@@ -68,42 +70,33 @@ impl Proxy {
                 .unwrap());
         }
 
-        match if req.method() == Method::CONNECT {
+        // Simplified: direct return instead of redundant match
+        if req.method() == Method::CONNECT {
             self.process_connect(req).await
         } else {
             self.process_request(req).await
-        } {
-            Ok(resp) => Ok(resp),
-            Err(e) => Err(e),
         }
-    }
-
-    fn authenticate(&self, req: &Request<Body>) -> bool {
-        if let Some(auth_header) = req.headers().get(PROXY_AUTHORIZATION) {
-            if let Ok(auth_str) = auth_header.to_str() {
-                if auth_str.starts_with("Basic ") {
-                    let credentials = auth_str.trim_start_matches("Basic ");
-                    if let Ok(decoded) =
-                        base64::engine::general_purpose::STANDARD.decode(credentials)
-                    {
-                        if let Ok(auth_string) = String::from_utf8(decoded) {
-                            let parts: Vec<&str> = auth_string.splitn(2, ':').collect();
-                            if parts.len() == 2 {
-                                return parts[0] == self.username && parts[1] == self.password;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        false
     }
 
     async fn process_connect(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
         tokio::task::spawn(async move {
-            let remote_addr = req.uri().authority().map(|auth| auth.to_string()).unwrap();
-            let mut upgraded = hyper::upgrade::on(req).await.unwrap();
-            self.tunnel(&mut upgraded, remote_addr).await
+            let remote_addr = match req.uri().authority() {
+                Some(auth) => auth.to_string(),
+                None => {
+                    eprintln!("CONNECT request missing authority");
+                    return;
+                }
+            };
+            match hyper::upgrade::on(req).await {
+                Ok(mut upgraded) => {
+                    if let Err(e) = self.tunnel(&mut upgraded, remote_addr).await {
+                        eprintln!("Tunnel error: {}", e);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Upgrade error: {}", e);
+                }
+            }
         });
         Ok(Response::new(Body::empty()))
     }
@@ -139,7 +132,7 @@ impl Proxy {
                 }
             }
         } else {
-            println!("error: {addr_str}");
+            eprintln!("Failed to resolve: {addr_str}");
         }
 
         Ok(())
@@ -203,7 +196,7 @@ struct StableProxy {
 
 impl StableProxy {
     async fn proxy(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
-        if !self.authenticate(&req) {
+        if !auth::authenticate_basic(&req, "proxy-authorization", &self.username, &self.password) {
             return Ok(Response::builder()
                 .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
                 .header(
@@ -214,44 +207,37 @@ impl StableProxy {
                 .unwrap());
         }
 
-        match if req.method() == Method::CONNECT {
+        // Simplified: direct return instead of redundant match
+        if req.method() == Method::CONNECT {
             self.process_connect(req).await
         } else {
             self.process_request(req).await
-        } {
-            Ok(resp) => Ok(resp),
-            Err(e) => Err(e),
         }
-    }
-
-    fn authenticate(&self, req: &Request<Body>) -> bool {
-        if let Some(auth_header) = req.headers().get(PROXY_AUTHORIZATION) {
-            if let Ok(auth_str) = auth_header.to_str() {
-                if auth_str.starts_with("Basic ") {
-                    let credentials = auth_str.trim_start_matches("Basic ");
-                    if let Ok(decoded) =
-                        base64::engine::general_purpose::STANDARD.decode(credentials)
-                    {
-                        if let Ok(auth_string) = String::from_utf8(decoded) {
-                            let parts: Vec<&str> = auth_string.splitn(2, ':').collect();
-                            if parts.len() == 2 {
-                                return parts[0] == self.username && parts[1] == self.password;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        false
     }
 
     async fn process_connect(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
         // Read stable IP before spawning to avoid Send issues
         let stable_ip = *self.state.read().await;
         tokio::task::spawn(async move {
-            let remote_addr = req.uri().authority().map(|auth| auth.to_string()).unwrap();
-            let mut upgraded = hyper::upgrade::on(req).await.unwrap();
-            Self::tunnel_with_ip(&mut upgraded, remote_addr, stable_ip).await
+            let remote_addr = match req.uri().authority() {
+                Some(auth) => auth.to_string(),
+                None => {
+                    eprintln!("[stable] CONNECT request missing authority");
+                    return;
+                }
+            };
+            match hyper::upgrade::on(req).await {
+                Ok(mut upgraded) => {
+                    if let Err(e) =
+                        Self::tunnel_with_ip(&mut upgraded, remote_addr, stable_ip).await
+                    {
+                        eprintln!("[stable] Tunnel error: {}", e);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[stable] Upgrade error: {}", e);
+                }
+            }
         });
         Ok(Response::new(Body::empty()))
     }
@@ -296,7 +282,7 @@ impl StableProxy {
                 }
             }
         } else {
-            println!("error: {addr_str}");
+            eprintln!("[stable] Failed to resolve: {addr_str}");
         }
 
         Ok(())

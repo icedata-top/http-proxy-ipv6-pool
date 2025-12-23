@@ -5,6 +5,7 @@ use std::{
 };
 use tokio::sync::RwLock;
 
+mod auth;
 mod controller;
 mod proxy;
 
@@ -66,17 +67,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let username = opt.auth.0;
     let password = opt.auth.1;
 
-    // Generate initial stable IPv6 address
-    let initial_ip = controller::generate_random_ipv6(ipv6_base, prefix_len);
-    let stable_state: proxy::StableIpv6State = Arc::new(RwLock::new(initial_ip));
-    println!("Initial stable IPv6: {}", initial_ip);
+    // Only initialize stable state if stable proxy or controller is enabled
+    let stable_state: Option<proxy::StableIpv6State> =
+        if opt.stable_bind.is_some() || opt.controller.is_some() {
+            let initial_ip = controller::generate_random_ipv6(ipv6_base, prefix_len);
+            println!("Initial stable IPv6: {}", initial_ip);
+            Some(Arc::new(RwLock::new(initial_ip)))
+        } else {
+            None
+        };
 
     // Start random proxy (always)
     let random_proxy = {
         let username = username.clone();
         let password = password.clone();
         async move {
-            println!("Random proxy listening on {}", opt.bind);
             proxy::start_proxy(opt.bind, (ipv6, prefix_len), username, password)
                 .await
                 .map_err(|e| format!("Random proxy error: {}", e))
@@ -84,33 +89,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Start stable proxy (optional)
-    let stable_proxy = async {
-        if let Some(stable_addr) = opt.stable_bind {
-            let state = stable_state.clone();
-            proxy::start_stable_proxy(stable_addr, state, username.clone(), password.clone())
-                .await
-                .map_err(|e| format!("Stable proxy error: {}", e))
-        } else {
-            Ok(())
+    let stable_proxy = {
+        let state = stable_state.clone();
+        let username = username.clone();
+        let password = password.clone();
+        async move {
+            if let (Some(stable_addr), Some(state)) = (opt.stable_bind, state) {
+                proxy::start_stable_proxy(stable_addr, state, username, password)
+                    .await
+                    .map_err(|e| format!("Stable proxy error: {}", e))
+            } else {
+                Ok(())
+            }
         }
     };
 
     // Start controller (optional)
-    let controller_server = async {
-        if let Some(controller_addr) = opt.controller {
-            let state = stable_state.clone();
-            controller::start_controller(
-                controller_addr,
-                state,
-                ipv6_base,
-                prefix_len,
-                username.clone(),
-                password.clone(),
-            )
-            .await
-            .map_err(|e| format!("Controller error: {}", e))
-        } else {
-            Ok(())
+    let controller_server = {
+        let state = stable_state;
+        let username = username.clone();
+        let password = password.clone();
+        async move {
+            if let (Some(controller_addr), Some(state)) = (opt.controller, state) {
+                controller::start_controller(
+                    controller_addr,
+                    state,
+                    ipv6_base,
+                    prefix_len,
+                    username,
+                    password,
+                )
+                .await
+                .map_err(|e| format!("Controller error: {}", e))
+            } else {
+                Ok(())
+            }
         }
     };
 

@@ -172,7 +172,7 @@ curl -X POST http://admin:password@127.0.0.1:8082/rotate
 # => {"ip": "2001:470:a::def2"}
 
 # Set specific IPv6 (must be within subnet)
-curl -X POST http://admin:password@127.0.0.1:8082/set -d '{"ip": "2001:470:a::1234"}'
+curl -X POST -H 'Content-Type: application/json' http://admin:password@127.0.0.1:8082/set -d '{"ip": "2001:470:a::1234"}'
 # => {"ip": "2001:470:a::1234"}
 ```
 
@@ -212,4 +212,7 @@ Then `systemctl daemon-reload; systemctl start http-proxy-ipv6-pool.service`.
 
 ## Author
 
-**Http Proxy IPv6 Pool** © [zu1k](https://github.com/zu1k) and [Beining](https://github.com/cnbeining), and [Ovler](https://github.com/Ovler-Young) Released under the [MIT](./LICENSE) License.
+**Http Proxy IPv6 Pool** © [zu1k](https://github.com/zu1k),
+[Beining](https://github.com/cnbeining), and
+[Ovler](https://github.com/Ovler-Young). Released under the [MIT](./LICENSE)
+License.
