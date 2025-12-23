@@ -79,14 +79,7 @@ lazy_static! {
         Regex::new(r"favicon\.ico$").unwrap(),
     ];
 
-    /// Windows Desktop User-Agents for randomization
-    static ref USER_AGENTS: Vec<&'static str> = vec![
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
-    ];
+
 
     /// Prometheus metrics registry
     static ref METRICS_REGISTRY: Registry = Registry::new();
@@ -142,7 +135,7 @@ fn generate_random_ipv6(ipv6_base: u128, prefix_len: u8) -> Ipv6Addr {
 /// Each client has a fixed User-Agent for more realistic behavior
 struct Ipv6Pool {
     /// Each entry is (reqwest::Client, fixed User-Agent)
-    clients: Vec<(reqwest::Client, &'static str)>,
+    clients: Vec<(reqwest::Client, String)>,
 }
 
 impl Ipv6Pool {
@@ -168,9 +161,9 @@ impl Ipv6Pool {
     }
 
     /// Get a random client with its fixed User-Agent
-    fn get_random_client(&self) -> (&reqwest::Client, &'static str) {
+    fn get_random_client(&self) -> (&reqwest::Client, &str) {
         let idx = rand::thread_rng().gen_range(0..self.clients.len());
-        (&self.clients[idx].0, self.clients[idx].1)
+        (&self.clients[idx].0, &self.clients[idx].1)
     }
 }
 
@@ -245,10 +238,9 @@ fn get_mixin_key(orig: &str) -> String {
         .collect()
 }
 
-/// Generate a random User-Agent
-fn random_user_agent() -> &'static str {
-    let mut rng = rand::thread_rng();
-    USER_AGENTS[rng.gen_range(0..USER_AGENTS.len())]
+/// Generate a random User-Agent using ua_generator
+fn random_user_agent() -> String {
+    ua_generator::ua::spoof_ua().to_string()
 }
 
 /// Generate random DedeUserID
