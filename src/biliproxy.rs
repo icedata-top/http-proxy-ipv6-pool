@@ -54,7 +54,7 @@ const WBI_KEYS_EXPIRY: Duration = Duration::from_secs(8 * 60 * 60);
 const MAX_RETRIES: u32 = 5;
 
 /// IPv6 pool size (number of pre-generated clients)
-const IPV6_POOL_SIZE: usize = 128;
+const IPV6_POOL_SIZE: usize = 16;
 
 /// Body type alias for responses
 type ResponseBody = BoxBody<Bytes, Infallible>;
