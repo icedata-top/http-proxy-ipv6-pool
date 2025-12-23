@@ -7,15 +7,18 @@
 //! - Adds CORS headers
 //! - Filters malicious scanner requests
 
+use bytes::Bytes;
 use chrono::Utc;
-use hyper::{
-    Body, Method, Request, Response, Server, StatusCode,
+use http::{
+    Method, Request, Response, StatusCode,
     header::{
         ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
         CONTENT_TYPE, HeaderValue,
     },
-    service::{make_service_fn, service_fn},
 };
+use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
+use hyper::{body::Incoming, server::conn::http1 as server_http1, service::service_fn};
+use hyper_util::rt::TokioIo;
 use lazy_static::lazy_static;
 use md5::{Digest, Md5};
 use parking_lot::RwLock;
@@ -27,10 +30,12 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    convert::Infallible,
     net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant},
 };
+use tokio::net::TcpListener;
 
 /// WBI mixin key encoding table
 const MIXIN_KEY_ENC_TAB: [usize; 64] = [
@@ -47,6 +52,9 @@ const WBI_KEYS_EXPIRY: Duration = Duration::from_secs(8 * 60 * 60);
 
 /// Maximum retries for non-200 responses
 const MAX_RETRIES: u32 = 5;
+
+/// Body type alias for responses
+type ResponseBody = BoxBody<Bytes, Infallible>;
 
 lazy_static! {
     /// Patterns to block scanner requests
@@ -161,6 +169,16 @@ struct NavData {
 struct WbiImg {
     img_url: String,
     sub_url: String,
+}
+
+/// Create an empty response body
+fn empty() -> ResponseBody {
+    Empty::<Bytes>::new().boxed()
+}
+
+/// Create a full response body from bytes
+fn full<T: Into<Bytes>>(chunk: T) -> ResponseBody {
+    Full::new(chunk.into()).boxed()
 }
 
 /// Get mixin key by scrambling img_key and sub_key
@@ -342,7 +360,7 @@ impl BiliproxyState {
     }
 
     /// Proxy a cover image request
-    async fn proxy_cover(&self, filename: &str) -> Result<Response<Body>, String> {
+    async fn proxy_cover(&self, filename: &str) -> Result<Response<ResponseBody>, String> {
         let target_url = format!("https://i0.hdslb.com/bfs/archive/{filename}");
         let user_agent = random_user_agent();
         let dede_user_id = random_dede_user_id();
@@ -390,7 +408,7 @@ impl BiliproxyState {
             .header(ACCESS_CONTROL_ALLOW_METHODS, "GET, OPTIONS");
 
         builder
-            .body(Body::from(body.to_vec()))
+            .body(full(body))
             .map_err(|e| format!("Failed to build cover response: {e}"))
     }
 
@@ -401,7 +419,7 @@ impl BiliproxyState {
         path: &str,
         query_params: HashMap<String, String>,
         body: Vec<u8>,
-    ) -> Result<Response<Body>, String> {
+    ) -> Result<Response<ResponseBody>, String> {
         let (target_url, should_sign) = self.determine_target(path);
 
         for attempt in 1..=MAX_RETRIES {
@@ -468,7 +486,7 @@ impl BiliproxyState {
         query_params: &HashMap<String, String>,
         body: &[u8],
         should_sign: bool,
-    ) -> Result<Response<Body>, String> {
+    ) -> Result<Response<ResponseBody>, String> {
         let user_agent = random_user_agent();
         let dede_user_id = random_dede_user_id();
         let dede_ck_md5 = random_dede_ck_md5();
@@ -566,7 +584,7 @@ impl BiliproxyState {
             );
 
         builder
-            .body(Body::from(response_body.to_vec()))
+            .body(full(response_body))
             .map_err(|e| format!("Failed to build response: {e}"))
     }
 }
@@ -617,9 +635,9 @@ fn normalize_route(path: &str) -> &str {
 
 /// Handle incoming requests with metrics
 async fn handle_request(
-    req: Request<Body>,
+    req: Request<Incoming>,
     state: Arc<BiliproxyState>,
-) -> Result<Response<Body>, hyper::Error> {
+) -> Result<Response<ResponseBody>, Infallible> {
     let start = Instant::now();
     let method_str = req.method().to_string();
     let path = req.uri().path().to_string();
@@ -628,40 +646,38 @@ async fn handle_request(
     let response = handle_request_inner(req, state).await;
 
     // Record metrics
-    if let Ok(ref resp) = response {
-        let status = resp.status().as_u16().to_string();
-        let duration_ms = start.elapsed().as_millis() as f64;
+    let status = response.status().as_u16().to_string();
+    let duration_ms = start.elapsed().as_millis() as f64;
 
-        HTTP_REQUEST_DURATION_MS
-            .with_label_values(&[&method_str, &route, &status])
-            .observe(duration_ms);
+    HTTP_REQUEST_DURATION_MS
+        .with_label_values(&[&method_str, &route, &status])
+        .observe(duration_ms);
 
-        if let Some(content_length) = resp.headers().get("content-length") {
-            if let Ok(len_str) = content_length.to_str() {
-                if let Ok(len) = len_str.parse::<u64>() {
-                    HTTP_RESPONSE_BYTES_TOTAL
-                        .with_label_values(&[&method_str, &route, &status])
-                        .inc_by(len);
-                }
+    if let Some(content_length) = response.headers().get("content-length") {
+        if let Ok(len_str) = content_length.to_str() {
+            if let Ok(len) = len_str.parse::<u64>() {
+                HTTP_RESPONSE_BYTES_TOTAL
+                    .with_label_values(&[&method_str, &route, &status])
+                    .inc_by(len);
             }
         }
     }
 
-    response
+    Ok(response)
 }
 
 /// Internal request handler
 async fn handle_request_inner(
-    req: Request<Body>,
+    req: Request<Incoming>,
     state: Arc<BiliproxyState>,
-) -> Result<Response<Body>, hyper::Error> {
+) -> Response<ResponseBody> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let query = req.uri().query().map(|s| s.to_string());
 
     // Handle CORS preflight
     if method == Method::OPTIONS {
-        return Ok(Response::builder()
+        return Response::builder()
             .status(StatusCode::OK)
             .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
             .header(
@@ -672,32 +688,32 @@ async fn handle_request_inner(
                 ACCESS_CONTROL_ALLOW_HEADERS,
                 "Origin, X-Requested-With, Content-Type, Accept, Authorization",
             )
-            .body(Body::empty())
-            .unwrap());
+            .body(empty())
+            .unwrap();
     }
 
     // Block scanner requests
     if is_blocked_path(&path) {
         println!("🚫 Blocked scanner request: {method} {path}");
-        return Ok(json_response(
+        return json_response(
             StatusCode::NOT_FOUND,
             &ErrorResponse {
                 error: "Not found".to_string(),
                 message: None,
             },
-        ));
+        );
     }
 
     // Block root path
     if path == "/" {
         println!("🚫 Blocked root access");
-        return Ok(json_response(
+        return json_response(
             StatusCode::NOT_FOUND,
             &ErrorResponse {
                 error: "Not found".to_string(),
                 message: None,
             },
-        ));
+        );
     }
 
     // Route requests
@@ -707,18 +723,18 @@ async fn handle_request_inner(
                 status: "ok",
                 timestamp: Utc::now().to_rfc3339(),
             };
-            Ok(json_response(StatusCode::OK, &response))
+            json_response(StatusCode::OK, &response)
         }
 
         (Method::GET, "/debug/wbi-keys") => match state.get_wbi_keys_info().await {
-            Ok(info) => Ok(json_response(StatusCode::OK, &info)),
-            Err(e) => Ok(json_response(
+            Ok(info) => json_response(StatusCode::OK, &info),
+            Err(e) => json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &ErrorResponse {
                     error: e,
                     message: None,
                 },
-            )),
+            ),
         },
 
         (Method::GET, "/metrics") => {
@@ -726,39 +742,39 @@ async fn handle_request_inner(
             let metric_families = METRICS_REGISTRY.gather();
             let mut buffer = Vec::new();
             encoder.encode(&metric_families, &mut buffer).unwrap();
-            Ok(Response::builder()
+            Response::builder()
                 .status(StatusCode::OK)
                 .header(CONTENT_TYPE, encoder.format_type())
-                .body(Body::from(buffer))
-                .unwrap())
+                .body(full(buffer))
+                .unwrap()
         }
 
-        (Method::GET, "/robots.txt") => Ok(Response::builder()
+        (Method::GET, "/robots.txt") => Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, "text/plain")
-            .body(Body::from("User-agent: *\nDisallow: /\n"))
-            .unwrap()),
+            .body(full("User-agent: *\nDisallow: /\n"))
+            .unwrap(),
 
         (Method::GET, p) if p.starts_with("/cover/") => {
             let filename = p.strip_prefix("/cover/").unwrap_or("");
             match state.proxy_cover(filename).await {
-                Ok(response) => Ok(response),
-                Err(e) => Ok(json_response(
+                Ok(response) => response,
+                Err(e) => json_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     &ErrorResponse {
                         error: "Cover proxy request failed".to_string(),
                         message: Some(e),
                     },
-                )),
+                ),
             }
         }
 
         _ => {
             // Read body for non-GET requests
-            let body_bytes = hyper::body::to_bytes(req.into_body())
-                .await
-                .map(|b| b.to_vec())
-                .unwrap_or_default();
+            let body_bytes = match req.into_body().collect().await {
+                Ok(collected) => collected.to_bytes().to_vec(),
+                Err(_) => Vec::new(),
+            };
 
             let query_params = parse_query_string(query.as_deref());
 
@@ -766,27 +782,27 @@ async fn handle_request_inner(
                 .proxy_request(&method, &path, query_params, body_bytes)
                 .await
             {
-                Ok(response) => Ok(response),
-                Err(e) => Ok(json_response(
+                Ok(response) => response,
+                Err(e) => json_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     &ErrorResponse {
                         error: "Proxy request failed".to_string(),
                         message: Some(e),
                     },
-                )),
+                ),
             }
         }
     }
 }
 
 /// Create a JSON response
-fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Body> {
+fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<ResponseBody> {
     let json = serde_json::to_string(body).unwrap_or_else(|_| "{}".to_string());
     Response::builder()
         .status(status)
         .header(CONTENT_TYPE, "application/json")
         .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-        .body(Body::from(json))
+        .body(full(json))
         .unwrap()
 }
 
@@ -796,24 +812,30 @@ pub async fn start_biliproxy(
     sessdata: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = Arc::new(BiliproxyState::new(sessdata));
-
-    let make_service = make_service_fn(move |_| {
-        let state = state.clone();
-        async move {
-            Ok::<_, hyper::Error>(service_fn(move |req| {
-                let state = state.clone();
-                handle_request(req, state)
-            }))
-        }
-    });
+    let listener = TcpListener::bind(bind_addr).await?;
 
     println!("Biliproxy listening on {bind_addr}");
     println!("  Health check: http://{bind_addr}/health");
     println!("  WBI keys debug: http://{bind_addr}/debug/wbi-keys");
     println!("  Bilibili API: http://{bind_addr}/x/web-interface/nav");
 
-    Server::bind(&bind_addr)
-        .serve(make_service)
-        .await
-        .map_err(|e| e.into())
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+        let state = state.clone();
+
+        tokio::spawn(async move {
+            let service = service_fn(move |req| {
+                let state = state.clone();
+                async move { handle_request(req, state).await }
+            });
+
+            if let Err(err) = server_http1::Builder::new()
+                .serve_connection(io, service)
+                .await
+            {
+                eprintln!("Biliproxy connection error: {err}");
+            }
+        });
+    }
 }

@@ -1,7 +1,7 @@
 //! Shared authentication utilities
 
 use base64::Engine;
-use hyper::{
+use http::{
     Request,
     header::{AUTHORIZATION, HeaderName, HeaderValue, PROXY_AUTHORIZATION},
 };

@@ -1,13 +1,23 @@
-use hyper::{
-    Body, Method, Request, Response, Server, StatusCode,
+use bytes::Bytes;
+use http::{
+    Method, Request, Response, StatusCode,
     header::{HeaderValue, WWW_AUTHENTICATE},
-    service::{make_service_fn, service_fn},
 };
+use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
+use hyper::{body::Incoming, server::conn::http1 as server_http1, service::service_fn};
+use hyper_util::rt::TokioIo;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::net::{Ipv6Addr, SocketAddr};
+use std::{
+    convert::Infallible,
+    net::{Ipv6Addr, SocketAddr},
+};
+use tokio::net::TcpListener;
 
 use crate::{auth, proxy::StableIpv6State};
+
+/// Body type alias for responses
+type ResponseBody = BoxBody<Bytes, Infallible>;
 
 #[derive(Serialize)]
 struct IpResponse {
@@ -22,6 +32,16 @@ struct SetIpRequest {
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
+}
+
+/// Create an empty response body
+fn empty() -> ResponseBody {
+    Empty::<Bytes>::new().boxed()
+}
+
+/// Create a full response body from bytes
+fn full<T: Into<Bytes>>(chunk: T) -> ResponseBody {
+    Full::new(chunk.into()).boxed()
 }
 
 /// Generate a random IPv6 address within the given subnet.
@@ -69,39 +89,44 @@ pub async fn start_controller(
     username: String,
     password: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let make_service = make_service_fn(move |_| {
+    let listener = TcpListener::bind(bind_addr).await?;
+    println!("Controller listening on {bind_addr}");
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let io = TokioIo::new(stream);
         let state = state.clone();
         let username = username.clone();
         let password = password.clone();
-        async move {
-            Ok::<_, hyper::Error>(service_fn(move |req| {
-                handle_request(
-                    req,
-                    state.clone(),
-                    ipv6_base,
-                    prefix_len,
-                    username.clone(),
-                    password.clone(),
-                )
-            }))
-        }
-    });
 
-    println!("Controller listening on {bind_addr}");
-    Server::bind(&bind_addr)
-        .serve(make_service)
-        .await
-        .map_err(|e| e.into())
+        tokio::spawn(async move {
+            let service = service_fn(move |req| {
+                let state = state.clone();
+                let username = username.clone();
+                let password = password.clone();
+                async move {
+                    handle_request(req, state, ipv6_base, prefix_len, username, password).await
+                }
+            });
+
+            if let Err(err) = server_http1::Builder::new()
+                .serve_connection(io, service)
+                .await
+            {
+                eprintln!("Controller connection error: {err}");
+            }
+        });
+    }
 }
 
 async fn handle_request(
-    req: Request<Body>,
+    req: Request<Incoming>,
     state: StableIpv6State,
     ipv6_base: u128,
     prefix_len: u8,
     username: String,
     password: String,
-) -> Result<Response<Body>, hyper::Error> {
+) -> Result<Response<ResponseBody>, Infallible> {
     // Check authentication using shared auth module with hyper constant
     if !auth::authenticate_authorization(&req, &username, &password) {
         return Ok(Response::builder()
@@ -110,7 +135,7 @@ async fn handle_request(
                 WWW_AUTHENTICATE,
                 HeaderValue::from_static("Basic realm=\"Controller\""),
             )
-            .body(Body::empty())
+            .body(empty())
             .unwrap());
     }
 
@@ -138,7 +163,17 @@ async fn handle_request(
         }
 
         (&Method::POST, "/set") => {
-            let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
+            // Collect body bytes
+            let body_bytes = match req.into_body().collect().await {
+                Ok(collected) => collected.to_bytes(),
+                Err(_) => {
+                    let response = ErrorResponse {
+                        error: "Failed to read request body".to_string(),
+                    };
+                    return Ok(json_response(StatusCode::BAD_REQUEST, &response));
+                }
+            };
+
             match serde_json::from_slice::<SetIpRequest>(&body_bytes) {
                 Ok(set_req) => match set_req.ip.parse::<Ipv6Addr>() {
                     Ok(new_ip) => {
@@ -186,7 +221,7 @@ async fn handle_request(
     }
 }
 
-fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Body> {
+fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<ResponseBody> {
     let json = match serde_json::to_string(body) {
         Ok(json) => json,
         Err(e) => {
@@ -197,6 +232,6 @@ fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Body> {
     Response::builder()
         .status(status)
         .header("Content-Type", "application/json")
-        .body(Body::from(json))
+        .body(full(json))
         .unwrap()
 }
