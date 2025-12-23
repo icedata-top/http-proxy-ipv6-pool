@@ -133,16 +133,58 @@ $ while true; do curl -x http://admin:123456@127.0.0.1:51080 ipv6.ip.sb; done
 2001:19f0:6001:48e4:971e:f12c:e2e7:d92a
 2001:19f0:6001:48e4:6d1c:90fe:ee79:1123
 2001:19f0:6001:48e4:f7b9:b506:99d7:1be9
-2001:19f0:6001:48e4:a06a:393b:e82f:bffc
-2001:19f0:6001:48e4:245f:8272:2dfb:72ce
-2001:19f0:6001:48e4:df9e:422c:f804:94f7
-2001:19f0:6001:48e4:dd48:6ba2:ff76:f1af
-2001:19f0:6001:48e4:1306:4a84:570c:f829
-2001:19f0:6001:48e4:6f3:4eb:c958:ddfa
-2001:19f0:6001:48e4:aa26:3bf9:6598:9e82
-2001:19f0:6001:48e4:be6b:6a62:f8f7:a14d
-2001:19f0:6001:48e4:b598:409d:b946:17c
+...
 ```
+
+### Stable Proxy with Controller API
+
+Run with stable proxy (fixed IPv6 until rotated) and controller API:
+
+```sh
+http-proxy-ipv6-pool \
+  -b 127.0.0.1:8080 \           # Random proxy
+  -s 127.0.0.1:8081 \           # Stable proxy (fixed IPv6)
+  -c 127.0.0.1:8082 \           # Controller API
+  -i 2001:470:a::/48 \
+  -a admin:password
+```
+
+**Stable proxy** uses a fixed IPv6 address until you rotate it:
+
+```sh
+# Multiple requests use the same IPv6
+curl -x http://admin:password@127.0.0.1:8081 ipv6.ip.sb
+# => 2001:470:a::abc1
+
+curl -x http://admin:password@127.0.0.1:8081 ipv6.ip.sb
+# => 2001:470:a::abc1  (same IP)
+```
+
+**Controller API** (requires authentication):
+
+```sh
+# Get current stable IPv6
+curl http://admin:password@127.0.0.1:8082/ip
+# => {"ip": "2001:470:a::abc1"}
+
+# Rotate to new random IPv6
+curl -X POST http://admin:password@127.0.0.1:8082/rotate
+# => {"ip": "2001:470:a::def2"}
+
+# Set specific IPv6 (must be within subnet)
+curl -X POST http://admin:password@127.0.0.1:8082/set -d '{"ip": "2001:470:a::1234"}'
+# => {"ip": "2001:470:a::1234"}
+```
+
+### CLI Options
+
+| Option          | Short | Description                                           |
+| --------------- | ----- | ----------------------------------------------------- |
+| `--bind`        | `-b`  | Random proxy listen address (default: 127.0.0.1:8080) |
+| `--stable-bind` | `-s`  | Stable proxy listen address (optional)                |
+| `--controller`  | `-c`  | Controller API listen address (optional)              |
+| `--ipv6-subnet` | `-i`  | IPv6 subnet in CIDR notation                          |
+| `--auth`        | `-a`  | Authentication (username:password)                    |
 
 ### Register as service
 
@@ -170,4 +212,4 @@ Then `systemctl daemon-reload; systemctl start http-proxy-ipv6-pool.service`.
 
 ## Author
 
-**Http Proxy IPv6 Pool** © [zu1k](https://github.com/zu1k) and [Beining](https://github.com/cnbeining), Released under the [MIT](./LICENSE) License.
+**Http Proxy IPv6 Pool** © [zu1k](https://github.com/zu1k) and [Beining](https://github.com/cnbeining), and [Ovler](https://github.com/Ovler-Young) Released under the [MIT](./LICENSE) License.

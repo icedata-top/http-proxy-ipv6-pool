@@ -1,14 +1,25 @@
 use clap::Parser;
 use std::net::{Ipv6Addr, SocketAddr};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
+mod controller;
 mod proxy;
 
 #[derive(Parser, Debug)]
 #[command(name = "ipv6-proxy")]
 struct Opt {
-    /// Bind address (e.g. 127.0.0.1:6700)
+    /// Bind address for random proxy (e.g. 127.0.0.1:8080)
     #[arg(short = 'b', long = "bind", default_value = "127.0.0.1:8080")]
     bind: SocketAddr,
+
+    /// Bind address for stable proxy (optional, e.g. 127.0.0.1:8081)
+    #[arg(short = 's', long = "stable-bind")]
+    stable_bind: Option<SocketAddr>,
+
+    /// Bind address for controller API (optional, e.g. 127.0.0.1:8082)
+    #[arg(short = 'c', long = "controller")]
+    controller: Option<SocketAddr>,
 
     /// IPv6 subnet in CIDR notation (e.g. 2001:19f0:6001:48e4::/64)
     #[arg(short = 'i', long = "ipv6-subnet", value_parser = parse_ipv6_cidr)]
@@ -47,5 +58,65 @@ fn parse_auth(s: &str) -> Result<(String, String), String> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opt = Opt::parse();
-    proxy::start_proxy(opt.bind, opt.ipv6_subnet, opt.auth.0, opt.auth.1).await
+
+    let (ipv6, prefix_len) = opt.ipv6_subnet;
+    let ipv6_base: u128 = ipv6.into();
+    let username = opt.auth.0;
+    let password = opt.auth.1;
+
+    // Generate initial stable IPv6 address
+    let initial_ip = controller::generate_random_ipv6(ipv6_base, prefix_len);
+    let stable_state: proxy::StableIpv6State = Arc::new(RwLock::new(initial_ip));
+    println!("Initial stable IPv6: {}", initial_ip);
+
+    // Start random proxy (always)
+    let random_proxy = {
+        let username = username.clone();
+        let password = password.clone();
+        async move {
+            println!("Random proxy listening on {}", opt.bind);
+            proxy::start_proxy(opt.bind, (ipv6, prefix_len), username, password)
+                .await
+                .map_err(|e| format!("Random proxy error: {}", e))
+        }
+    };
+
+    // Start stable proxy (optional)
+    let stable_proxy = async {
+        if let Some(stable_addr) = opt.stable_bind {
+            let state = stable_state.clone();
+            proxy::start_stable_proxy(stable_addr, state, username.clone(), password.clone())
+                .await
+                .map_err(|e| format!("Stable proxy error: {}", e))
+        } else {
+            Ok(())
+        }
+    };
+
+    // Start controller (optional)
+    let controller_server = async {
+        if let Some(controller_addr) = opt.controller {
+            let state = stable_state.clone();
+            controller::start_controller(
+                controller_addr,
+                state,
+                ipv6_base,
+                prefix_len,
+                username.clone(),
+                password.clone(),
+            )
+            .await
+            .map_err(|e| format!("Controller error: {}", e))
+        } else {
+            Ok(())
+        }
+    };
+
+    // Run all services concurrently
+    let (r1, r2, r3) = tokio::join!(random_proxy, stable_proxy, controller_server);
+    r1?;
+    r2?;
+    r3?;
+
+    Ok(())
 }

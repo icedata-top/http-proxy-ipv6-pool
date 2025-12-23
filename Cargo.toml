@@ -18,6 +18,8 @@ tokio = { version = "1.42", features = ["net", "rt-multi-thread", "macros", "io-
 rand = "0.8"
 clap = { version = "4", features = ["derive"] }
 base64 = "0.21"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 
 [profile.release]

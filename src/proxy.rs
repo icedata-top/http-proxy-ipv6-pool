@@ -8,9 +8,11 @@ use hyper::{
 };
 use rand::Rng;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs};
+use std::sync::Arc;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpSocket,
+    sync::RwLock,
 };
 
 pub async fn start_proxy(
@@ -153,4 +155,148 @@ fn get_rand_ipv6(mut ipv6: u128, prefix_len: u8) -> IpAddr {
     let host_part = (rand << prefix_len) >> prefix_len;
     ipv6 = net_part | host_part;
     IpAddr::V6(ipv6.into())
+}
+
+/// Shared state for the stable IPv6 address
+pub type StableIpv6State = Arc<RwLock<Ipv6Addr>>;
+
+/// Start a stable proxy server that uses a fixed IPv6 address from shared state
+pub async fn start_stable_proxy(
+    listen_addr: SocketAddr,
+    state: StableIpv6State,
+    username: String,
+    password: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let make_service = make_service_fn(move |_: &AddrStream| {
+        let state = state.clone();
+        let username = username.clone();
+        let password = password.clone();
+        async move {
+            Ok::<_, hyper::Error>(service_fn(move |req| {
+                let proxy = StableProxy {
+                    state: state.clone(),
+                    username: username.clone(),
+                    password: password.clone(),
+                };
+                proxy.proxy(req)
+            }))
+        }
+    });
+
+    println!("Stable proxy listening on {}", listen_addr);
+    Server::bind(&listen_addr)
+        .http1_preserve_header_case(true)
+        .http1_title_case_headers(true)
+        .serve(make_service)
+        .await
+        .map_err(|e| e.into())
+}
+
+#[derive(Clone)]
+struct StableProxy {
+    state: StableIpv6State,
+    username: String,
+    password: String,
+}
+
+impl StableProxy {
+    async fn proxy(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+        if !self.authenticate(&req) {
+            return Ok(Response::builder()
+                .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
+                .header(
+                    PROXY_AUTHENTICATE,
+                    HeaderValue::from_static("Basic realm=\"Proxy\""),
+                )
+                .body(Body::empty())
+                .unwrap());
+        }
+
+        match if req.method() == Method::CONNECT {
+            self.process_connect(req).await
+        } else {
+            self.process_request(req).await
+        } {
+            Ok(resp) => Ok(resp),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn authenticate(&self, req: &Request<Body>) -> bool {
+        if let Some(auth_header) = req.headers().get(PROXY_AUTHORIZATION) {
+            if let Ok(auth_str) = auth_header.to_str() {
+                if auth_str.starts_with("Basic ") {
+                    let credentials = auth_str.trim_start_matches("Basic ");
+                    if let Ok(decoded) =
+                        base64::engine::general_purpose::STANDARD.decode(credentials)
+                    {
+                        if let Ok(auth_string) = String::from_utf8(decoded) {
+                            let parts: Vec<&str> = auth_string.splitn(2, ':').collect();
+                            if parts.len() == 2 {
+                                return parts[0] == self.username && parts[1] == self.password;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    async fn process_connect(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+        // Read stable IP before spawning to avoid Send issues
+        let stable_ip = *self.state.read().await;
+        tokio::task::spawn(async move {
+            let remote_addr = req.uri().authority().map(|auth| auth.to_string()).unwrap();
+            let mut upgraded = hyper::upgrade::on(req).await.unwrap();
+            Self::tunnel_with_ip(&mut upgraded, remote_addr, stable_ip).await
+        });
+        Ok(Response::new(Body::empty()))
+    }
+
+    async fn process_request(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+        let stable_ip = *self.state.read().await;
+        let bind_addr = IpAddr::V6(stable_ip);
+        let mut http = HttpConnector::new();
+        http.set_local_address(Some(bind_addr));
+        println!(
+            "[stable] {} via {bind_addr}",
+            req.uri().host().unwrap_or_default()
+        );
+
+        let client = Client::builder()
+            .http1_title_case_headers(true)
+            .http1_preserve_header_case(true)
+            .build(http);
+        let res = client.request(req).await?;
+        Ok(res)
+    }
+
+    async fn tunnel_with_ip<A>(
+        upgraded: &mut A,
+        addr_str: String,
+        stable_ip: Ipv6Addr,
+    ) -> std::io::Result<()>
+    where
+        A: AsyncRead + AsyncWrite + Unpin + ?Sized,
+    {
+        if let Ok(addrs) = addr_str.to_socket_addrs() {
+            for addr in addrs {
+                let socket = TcpSocket::new_v6()?;
+                // Use rand::random() instead of thread_rng().gen() for Send compatibility
+                let bind_addr = SocketAddr::new(IpAddr::V6(stable_ip), rand::random::<u16>());
+                if socket.bind(bind_addr).is_ok() {
+                    println!("[stable] {addr_str} via {bind_addr}");
+                    if let Ok(mut server) = socket.connect(addr).await {
+                        tokio::io::copy_bidirectional(upgraded, &mut server).await?;
+                        return Ok(());
+                    }
+                }
+            }
+        } else {
+            println!("error: {addr_str}");
+        }
+
+        Ok(())
+    }
 }
