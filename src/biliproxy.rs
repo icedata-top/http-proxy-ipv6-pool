@@ -169,11 +169,34 @@ impl Ipv6Pool {
         }
     }
 
-    /// Get a random client with its fixed User-Agent (returns cloned values)
-    fn get_random_client(&self) -> (reqwest::Client, String) {
+    /// Get a random client with its fixed User-Agent and index (returns cloned values)
+    fn get_random_client(&self) -> (reqwest::Client, String, usize) {
         let clients = self.clients.read();
         let idx = rand::thread_rng().gen_range(0..clients.len());
-        (clients[idx].0.clone(), clients[idx].1.clone())
+        (clients[idx].0.clone(), clients[idx].1.clone(), idx)
+    }
+
+    /// Get the client at a specific index (returns cloned values)
+    fn get_client_by_index(&self, index: usize) -> (reqwest::Client, String) {
+        let clients = self.clients.read();
+        (clients[index].0.clone(), clients[index].1.clone())
+    }
+
+    /// Force rotate the client at the specified index (used when a request fails)
+    /// Returns the new (client, user_agent) pair
+    fn force_rotate(&self, index: usize) -> (reqwest::Client, String) {
+        let ip = generate_random_ipv6(self.ipv6_base, self.prefix_len);
+        let ua = random_user_agent();
+        let client = reqwest::Client::builder()
+            .local_address(IpAddr::V6(ip))
+            .timeout(self.timeout)
+            .build()
+            .expect("Failed to create client");
+
+        let mut clients = self.clients.write();
+        clients[index] = (client.clone(), ua.clone());
+        println!("🔄 Force rotated slot {index} to new IP: {ip}");
+        (client, ua)
     }
 
     /// 1/128 chance to rotate a random client
@@ -306,7 +329,7 @@ impl BiliproxyState {
     async fn fetch_wbi_keys(&self) -> Result<WbiKeys, String> {
         let url = "https://api.bilibili.com/x/web-interface/nav";
 
-        let (client, user_agent) = self.ipv6_pool.get_random_client();
+        let (client, user_agent, _) = self.ipv6_pool.get_random_client();
         let mut request = client.get(url).header("User-Agent", user_agent);
 
         if let Some(ref sessdata) = self.sessdata {
@@ -437,7 +460,7 @@ impl BiliproxyState {
         let dede_user_id = random_dede_user_id();
         let dede_ck_md5 = random_dede_ck_md5();
 
-        let (client, user_agent) = self.ipv6_pool.get_random_client();
+        let (client, user_agent, _) = self.ipv6_pool.get_random_client();
         let response = client
             .get(&target_url)
             .header("User-Agent", user_agent)
@@ -484,7 +507,7 @@ impl BiliproxyState {
             .map_err(|e| format!("Failed to build cover response: {e}"))
     }
 
-    /// Proxy a generic request (with retry logic)
+    /// Proxy a generic request (with retry logic and bound-retry rotation)
     async fn proxy_request(
         &self,
         method: &Method,
@@ -494,9 +517,12 @@ impl BiliproxyState {
     ) -> Result<Response<ResponseBody>, String> {
         let (target_url, should_sign) = self.determine_target(path);
 
+        // Get initial pool index (client will be fetched by do_proxy_request)
+        let (_, _, idx) = self.ipv6_pool.get_random_client();
+
         for attempt in 1..=MAX_RETRIES {
             let result = self
-                .do_proxy_request(method, &target_url, &query_params, &body, should_sign)
+                .do_proxy_request(idx, method, &target_url, &query_params, &body, should_sign)
                 .await;
 
             match result {
@@ -509,11 +535,13 @@ impl BiliproxyState {
 
                     if attempt < MAX_RETRIES {
                         println!(
-                            "⚠️  Retry {}/{} - Status: {} - Regenerating signatures & cookies...",
+                            "⚠️  Retry {}/{} - Status: {} - Rotating slot {idx}...",
                             attempt,
                             MAX_RETRIES - 1,
                             status.as_u16()
                         );
+                        // Force rotate the problematic client (next do_proxy_request will get the new one)
+                        self.ipv6_pool.force_rotate(idx);
                         continue;
                     }
 
@@ -522,7 +550,13 @@ impl BiliproxyState {
                 }
                 Err(e) => {
                     if attempt < MAX_RETRIES {
-                        println!("⚠️  Retry {}/{} - Error: {}", attempt, MAX_RETRIES - 1, e);
+                        println!(
+                            "⚠️  Retry {}/{} - Error: {e} - Rotating slot {idx}...",
+                            attempt,
+                            MAX_RETRIES - 1
+                        );
+                        // Force rotate the problematic client
+                        self.ipv6_pool.force_rotate(idx);
                         continue;
                     }
                     return Err(e);
@@ -553,9 +587,10 @@ impl BiliproxyState {
         (format!("https://api.bilibili.com{path}"), true)
     }
 
-    /// Execute a single proxy request
+    /// Execute a single proxy request using a specific pool index
     async fn do_proxy_request(
         &self,
+        pool_index: usize,
         method: &Method,
         target_url: &str,
         query_params: &HashMap<String, String>,
@@ -605,7 +640,8 @@ impl BiliproxyState {
             cookies.push(format!("SESSDATA={sessdata}"));
         }
 
-        let (client, user_agent) = self.ipv6_pool.get_random_client();
+        // Get client from pool by index
+        let (client, user_agent) = self.ipv6_pool.get_client_by_index(pool_index);
         let request_builder = match *method {
             Method::GET => client.get(&url),
             Method::POST => client.post(&url).body(body.to_vec()),
