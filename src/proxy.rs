@@ -44,7 +44,7 @@ pub async fn start_proxy(
         }
     });
 
-    println!("Random proxy listening on {}", listen_addr);
+    println!("Random proxy listening on {listen_addr}");
     Server::bind(&listen_addr)
         .http1_preserve_header_case(true)
         .http1_title_case_headers(true)
@@ -94,11 +94,11 @@ impl Proxy {
             match hyper::upgrade::on(req).await {
                 Ok(mut upgraded) => {
                     if let Err(e) = self.tunnel(&mut upgraded, remote_addr).await {
-                        eprintln!("Tunnel error: {}", e);
+                        eprintln!("Tunnel error: {e}");
                     }
                 }
                 Err(e) => {
-                    eprintln!("Upgrade error: {}", e);
+                    eprintln!("Upgrade error: {e}");
                 }
             }
         });
@@ -126,7 +126,7 @@ impl Proxy {
         let addrs = match addr_str.to_socket_addrs() {
             Ok(addrs) => addrs,
             Err(e) => {
-                eprintln!("Failed to resolve {}: {}", addr_str, e);
+                eprintln!("Failed to resolve {addr_str}: {e}");
                 return Err(e);
             }
         };
@@ -145,7 +145,7 @@ impl Proxy {
 
         Err(IoError::new(
             ErrorKind::ConnectionRefused,
-            format!("Failed to connect to {}", addr_str),
+            format!("Failed to connect to {addr_str}"),
         ))
     }
 }
@@ -195,7 +195,7 @@ pub async fn start_stable_proxy(
         }
     });
 
-    println!("Stable proxy listening on {}", listen_addr);
+    println!("Stable proxy listening on {listen_addr}");
     Server::bind(&listen_addr)
         .http1_preserve_header_case(true)
         .http1_title_case_headers(true)
@@ -247,11 +247,11 @@ impl StableProxy {
                     if let Err(e) =
                         Self::tunnel_with_ip(&mut upgraded, remote_addr, stable_ip).await
                     {
-                        eprintln!("[stable] Tunnel error: {}", e);
+                        eprintln!("[stable] Tunnel error: {e}");
                     }
                 }
                 Err(e) => {
-                    eprintln!("[stable] Upgrade error: {}", e);
+                    eprintln!("[stable] Upgrade error: {e}");
                 }
             }
         });
@@ -287,7 +287,7 @@ impl StableProxy {
         let addrs = match addr_str.to_socket_addrs() {
             Ok(addrs) => addrs,
             Err(e) => {
-                eprintln!("[stable] Failed to resolve {}: {}", addr_str, e);
+                eprintln!("[stable] Failed to resolve {addr_str}: {e}");
                 return Err(e);
             }
         };
@@ -306,7 +306,7 @@ impl StableProxy {
 
         Err(IoError::new(
             ErrorKind::ConnectionRefused,
-            format!("[stable] Failed to connect to {}", addr_str),
+            format!("[stable] Failed to connect to {addr_str}"),
         ))
     }
 }

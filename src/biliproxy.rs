@@ -192,18 +192,18 @@ impl BiliproxyState {
         let mut request = self.http_client.get(url).header("User-Agent", user_agent);
 
         if let Some(ref sessdata) = self.sessdata {
-            request = request.header("Cookie", format!("SESSDATA={}", sessdata));
+            request = request.header("Cookie", format!("SESSDATA={sessdata}"));
         }
 
         let response = request
             .send()
             .await
-            .map_err(|e| format!("Failed to fetch WBI keys: {}", e))?;
+            .map_err(|e| format!("Failed to fetch WBI keys: {e}"))?;
 
         let nav: NavResponse = response
             .json()
             .await
-            .map_err(|e| format!("Failed to parse nav response: {}", e))?;
+            .map_err(|e| format!("Failed to parse nav response: {e}"))?;
 
         let wbi_img = nav
             .data
@@ -214,7 +214,7 @@ impl BiliproxyState {
         let img_key = extract_key_from_url(&wbi_img.img_url)?;
         let sub_key = extract_key_from_url(&wbi_img.sub_url)?;
 
-        println!("WBI keys fetched: img_key={}, sub_key={}", img_key, sub_key);
+        println!("WBI keys fetched: img_key={img_key}, sub_key={sub_key}");
 
         Ok(WbiKeys {
             img_key,
@@ -275,7 +275,7 @@ impl BiliproxyState {
         params: &HashMap<String, String>,
     ) -> Result<HashMap<String, String>, String> {
         let (img_key, sub_key) = self.get_wbi_keys().await?;
-        let mixin_key = get_mixin_key(&format!("{}{}", img_key, sub_key));
+        let mixin_key = get_mixin_key(&format!("{img_key}{sub_key}"));
 
         // Add timestamp
         let wts = Utc::now().timestamp();
@@ -305,7 +305,7 @@ impl BiliproxyState {
 
         // Calculate MD5 hash for w_rid
         let mut hasher = Md5::new();
-        hasher.update(format!("{}{}", query, mixin_key));
+        hasher.update(format!("{query}{mixin_key}"));
         let w_rid = hex::encode(hasher.finalize());
 
         signed_params.insert("w_rid".to_string(), w_rid);
@@ -315,7 +315,7 @@ impl BiliproxyState {
 
     /// Proxy a cover image request
     async fn proxy_cover(&self, filename: &str) -> Result<Response<Body>, String> {
-        let target_url = format!("https://i0.hdslb.com/bfs/archive/{}", filename);
+        let target_url = format!("https://i0.hdslb.com/bfs/archive/{filename}");
         let user_agent = random_user_agent();
         let dede_user_id = random_dede_user_id();
         let dede_ck_md5 = random_dede_ck_md5();
@@ -327,21 +327,18 @@ impl BiliproxyState {
             .header("Referer", "https://www.bilibili.com/")
             .header(
                 "Cookie",
-                format!(
-                    "DedeUserID={}; DedeUserID__ckMd5={}",
-                    dede_user_id, dede_ck_md5
-                ),
+                format!("DedeUserID={dede_user_id}; DedeUserID__ckMd5={dede_ck_md5}"),
             )
             .send()
             .await
-            .map_err(|e| format!("Cover proxy error: {}", e))?;
+            .map_err(|e| format!("Cover proxy error: {e}"))?;
 
         let status = response.status();
         let headers = response.headers().clone();
         let body = response
             .bytes()
             .await
-            .map_err(|e| format!("Failed to read cover body: {}", e))?;
+            .map_err(|e| format!("Failed to read cover body: {e}"))?;
 
         println!("Cover: {} - {}", status.as_u16(), filename);
 
@@ -366,7 +363,7 @@ impl BiliproxyState {
 
         builder
             .body(Body::from(body.to_vec()))
-            .map_err(|e| format!("Failed to build cover response: {}", e))
+            .map_err(|e| format!("Failed to build cover response: {e}"))
     }
 
     /// Proxy a generic request (with retry logic)
@@ -428,11 +425,11 @@ impl BiliproxyState {
         // api.vc.bilibili.com
         if path.starts_with("/apivc") {
             let api_path = path.strip_prefix("/apivc").unwrap_or("");
-            return (format!("https://api.vc.bilibili.com{}", api_path), false);
+            return (format!("https://api.vc.bilibili.com{api_path}"), false);
         }
 
         // Default to api.bilibili.com with WBI signing
-        (format!("https://api.bilibili.com{}", path), true)
+        (format!("https://api.bilibili.com{path}"), true)
     }
 
     /// Execute a single proxy request
@@ -450,12 +447,12 @@ impl BiliproxyState {
 
         // Determine referer based on bvid/avid/aid
         let referer = if let Some(bvid) = query_params.get("bvid") {
-            format!("https://www.bilibili.com/video/{}", bvid)
+            format!("https://www.bilibili.com/video/{bvid}")
         } else if let Some(avid) = query_params.get("avid") {
             let avid_num = avid.trim_start_matches("av").trim_start_matches("AV");
-            format!("https://www.bilibili.com/video/av{}", avid_num)
+            format!("https://www.bilibili.com/video/av{avid_num}")
         } else if let Some(aid) = query_params.get("aid") {
-            format!("https://www.bilibili.com/video/av{}", aid)
+            format!("https://www.bilibili.com/video/av{aid}")
         } else {
             "https://www.bilibili.com/".to_string()
         };
@@ -476,7 +473,7 @@ impl BiliproxyState {
                 .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
                 .collect::<Vec<_>>()
                 .join("&");
-            format!("{}?{}", target_url, query_string)
+            format!("{target_url}?{query_string}")
         };
 
         // Build cookie
@@ -485,7 +482,7 @@ impl BiliproxyState {
             format!("DedeUserID__ckMd5={}", dede_ck_md5),
         ];
         if let Some(ref sessdata) = self.sessdata {
-            cookies.push(format!("SESSDATA={}", sessdata));
+            cookies.push(format!("SESSDATA={sessdata}"));
         }
 
         let request_builder = match *method {
@@ -503,14 +500,14 @@ impl BiliproxyState {
             .header("Cookie", cookies.join("; "))
             .send()
             .await
-            .map_err(|e| format!("Proxy request failed: {}", e))?;
+            .map_err(|e| format!("Proxy request failed: {e}"))?;
 
         let status = response.status();
         let headers = response.headers().clone();
         let response_body = response
             .bytes()
             .await
-            .map_err(|e| format!("Failed to read response body: {}", e))?;
+            .map_err(|e| format!("Failed to read response body: {e}"))?;
 
         println!("{} - {}", status.as_u16(), target_url);
 
@@ -542,7 +539,7 @@ impl BiliproxyState {
 
         builder
             .body(Body::from(response_body.to_vec()))
-            .map_err(|e| format!("Failed to build response: {}", e))
+            .map_err(|e| format!("Failed to build response: {e}"))
     }
 }
 
@@ -602,7 +599,7 @@ async fn handle_request(
 
     // Block scanner requests
     if is_blocked_path(&path) {
-        println!("🚫 Blocked scanner request: {} {}", method, path);
+        println!("🚫 Blocked scanner request: {method} {path}");
         return Ok(json_response(
             StatusCode::NOT_FOUND,
             &ErrorResponse {
@@ -719,10 +716,10 @@ pub async fn start_biliproxy(
         }
     });
 
-    println!("Biliproxy listening on {}", bind_addr);
-    println!("  Health check: http://{}/health", bind_addr);
-    println!("  WBI keys debug: http://{}/debug/wbi-keys", bind_addr);
-    println!("  Bilibili API: http://{}/x/web-interface/nav", bind_addr);
+    println!("Biliproxy listening on {bind_addr}");
+    println!("  Health check: http://{bind_addr}/health");
+    println!("  WBI keys debug: http://{bind_addr}/debug/wbi-keys");
+    println!("  Bilibili API: http://{bind_addr}/x/web-interface/nav");
 
     Server::bind(&bind_addr)
         .serve(make_service)

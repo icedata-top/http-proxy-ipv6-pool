@@ -92,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stable_state: Option<proxy::StableIpv6State> =
         if opt.stable_bind.is_some() || opt.controller.is_some() {
             let initial_ip = controller::generate_random_ipv6(ipv6_base, prefix_len);
-            println!("Initial stable IPv6: {}", initial_ip);
+            println!("Initial stable IPv6: {initial_ip}");
             Some(Arc::new(RwLock::new(initial_ip)))
         } else {
             None

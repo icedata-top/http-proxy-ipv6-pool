@@ -87,7 +87,7 @@ pub async fn start_controller(
         }
     });
 
-    println!("Controller listening on {}", bind_addr);
+    println!("Controller listening on {bind_addr}");
     Server::bind(&bind_addr)
         .serve(make_service)
         .await
@@ -130,7 +130,7 @@ async fn handle_request(
                 let mut ip = state.write().await;
                 *ip = new_ip;
             }
-            println!("Rotated stable IPv6 to: {}", new_ip);
+            println!("Rotated stable IPv6 to: {new_ip}");
             let response = IpResponse {
                 ip: new_ip.to_string(),
             };
@@ -154,7 +154,7 @@ async fn handle_request(
                             let mut ip = state.write().await;
                             *ip = new_ip;
                         }
-                        println!("Set stable IPv6 to: {}", new_ip);
+                        println!("Set stable IPv6 to: {new_ip}");
                         let response = IpResponse {
                             ip: new_ip.to_string(),
                         };
@@ -190,7 +190,7 @@ fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Body> {
     let json = match serde_json::to_string(body) {
         Ok(json) => json,
         Err(e) => {
-            eprintln!("Failed to serialize JSON response: {}", e);
+            eprintln!("Failed to serialize JSON response: {e}");
             "{}".to_string()
         }
     };
