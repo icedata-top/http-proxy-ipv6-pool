@@ -24,14 +24,14 @@ fn parse_ipv6_cidr(s: &str) -> Result<(Ipv6Addr, u8), Box<dyn std::error::Error>
     if parts.len() != 2 {
         return Err("Invalid CIDR format. Expected format: 2001:db8::/64".into());
     }
-    
+
     let addr = parts[0].parse::<Ipv6Addr>()?;
     let prefix_len = parts[1].parse::<u8>()?;
-    
+
     if prefix_len > 128 {
         return Err("Prefix length must be between 0 and 128".into());
     }
-    
+
     Ok((addr, prefix_len))
 }
 
@@ -40,7 +40,7 @@ fn parse_auth(s: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
     if parts.len() != 2 {
         return Err("Invalid auth format. Expected format: username:password".into());
     }
-    
+
     Ok((parts[0].to_string(), parts[1].to_string()))
 }
 

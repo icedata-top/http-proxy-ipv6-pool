@@ -1,10 +1,10 @@
 use base64::Engine;
 use hyper::{
+    Body, Client, Method, Request, Response, Server, StatusCode,
     client::HttpConnector,
     header::{HeaderValue, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION},
     server::conn::AddrStream,
     service::{make_service_fn, service_fn},
-    Body, Client, Method, Request, Response, Server, StatusCode,
 };
 use rand::Rng;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs};
@@ -79,7 +79,9 @@ impl Proxy {
             if let Ok(auth_str) = auth_header.to_str() {
                 if auth_str.starts_with("Basic ") {
                     let credentials = auth_str.trim_start_matches("Basic ");
-                    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(credentials) {
+                    if let Ok(decoded) =
+                        base64::engine::general_purpose::STANDARD.decode(credentials)
+                    {
                         if let Ok(auth_string) = String::from_utf8(decoded) {
                             let parts: Vec<&str> = auth_string.splitn(2, ':').collect();
                             if parts.len() == 2 {
