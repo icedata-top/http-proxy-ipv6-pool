@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     convert::Infallible,
-    net::SocketAddr,
+    net::{IpAddr, Ipv6Addr, SocketAddr},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -52,6 +52,9 @@ const WBI_KEYS_EXPIRY: Duration = Duration::from_secs(8 * 60 * 60);
 
 /// Maximum retries for non-200 responses
 const MAX_RETRIES: u32 = 5;
+
+/// IPv6 pool size (number of pre-generated clients)
+const IPV6_POOL_SIZE: usize = 128;
 
 /// Body type alias for responses
 type ResponseBody = BoxBody<Bytes, Infallible>;
@@ -119,11 +122,63 @@ struct WbiKeys {
     expires_at: Instant,
 }
 
+/// Generate a random IPv6 address within the given subnet.
+fn generate_random_ipv6(ipv6_base: u128, prefix_len: u8) -> Ipv6Addr {
+    if prefix_len == 0 {
+        return Ipv6Addr::from(rand::thread_rng().gen::<u128>());
+    }
+    if prefix_len >= 128 {
+        return Ipv6Addr::from(ipv6_base);
+    }
+
+    let rand_val: u128 = rand::thread_rng().gen();
+    let shift_amount = 128 - prefix_len;
+    let net_part = (ipv6_base >> shift_amount) << shift_amount;
+    let host_part = (rand_val << prefix_len) >> prefix_len;
+    Ipv6Addr::from(net_part | host_part)
+}
+
+/// IPv6 client pool for load distribution and 412 avoidance
+/// Each client has a fixed User-Agent for more realistic behavior
+struct Ipv6Pool {
+    /// Each entry is (reqwest::Client, fixed User-Agent)
+    clients: Vec<(reqwest::Client, &'static str)>,
+}
+
+impl Ipv6Pool {
+    fn new(ipv6_base: u128, prefix_len: u8, timeout: Duration) -> Self {
+        println!("Initializing IPv6 pool with {IPV6_POOL_SIZE} addresses...");
+        let clients: Vec<_> = (0..IPV6_POOL_SIZE)
+            .map(|i| {
+                let ip = generate_random_ipv6(ipv6_base, prefix_len);
+                let ua = random_user_agent();
+                if i == 0 {
+                    println!("  First pool IP: {ip}");
+                }
+                let client = reqwest::Client::builder()
+                    .local_address(IpAddr::V6(ip))
+                    .timeout(timeout)
+                    .build()
+                    .expect("Failed to create client");
+                (client, ua)
+            })
+            .collect();
+        println!("IPv6 pool initialized with {} clients", clients.len());
+        Self { clients }
+    }
+
+    /// Get a random client with its fixed User-Agent
+    fn get_random_client(&self) -> (&reqwest::Client, &'static str) {
+        let idx = rand::thread_rng().gen_range(0..self.clients.len());
+        (&self.clients[idx].0, self.clients[idx].1)
+    }
+}
+
 /// Shared state for the biliproxy server
 struct BiliproxyState {
     wbi_keys: RwLock<Option<WbiKeys>>,
     sessdata: Option<String>,
-    http_client: reqwest::Client,
+    ipv6_pool: Ipv6Pool,
 }
 
 /// Health check response
@@ -217,25 +272,22 @@ fn is_blocked_path(path: &str) -> bool {
 }
 
 impl BiliproxyState {
-    fn new(sessdata: Option<String>) -> Self {
-        let http_client = reqwest::Client::builder()
-            .timeout(DEFAULT_TIMEOUT)
-            .build()
-            .expect("Failed to create HTTP client");
+    fn new(sessdata: Option<String>, ipv6: Ipv6Addr, prefix_len: u8) -> Self {
+        let ipv6_pool = Ipv6Pool::new(ipv6.into(), prefix_len, DEFAULT_TIMEOUT);
 
         Self {
             wbi_keys: RwLock::new(None),
             sessdata,
-            http_client,
+            ipv6_pool,
         }
     }
 
     /// Fetch WBI keys from Bilibili API
     async fn fetch_wbi_keys(&self) -> Result<WbiKeys, String> {
         let url = "https://api.bilibili.com/x/web-interface/nav";
-        let user_agent = random_user_agent();
 
-        let mut request = self.http_client.get(url).header("User-Agent", user_agent);
+        let (client, user_agent) = self.ipv6_pool.get_random_client();
+        let mut request = client.get(url).header("User-Agent", user_agent);
 
         if let Some(ref sessdata) = self.sessdata {
             request = request.header("Cookie", format!("SESSDATA={sessdata}"));
@@ -362,12 +414,11 @@ impl BiliproxyState {
     /// Proxy a cover image request
     async fn proxy_cover(&self, filename: &str) -> Result<Response<ResponseBody>, String> {
         let target_url = format!("https://i0.hdslb.com/bfs/archive/{filename}");
-        let user_agent = random_user_agent();
         let dede_user_id = random_dede_user_id();
         let dede_ck_md5 = random_dede_ck_md5();
 
-        let response = self
-            .http_client
+        let (client, user_agent) = self.ipv6_pool.get_random_client();
+        let response = client
             .get(&target_url)
             .header("User-Agent", user_agent)
             .header("Referer", "https://www.bilibili.com/")
@@ -487,7 +538,6 @@ impl BiliproxyState {
         body: &[u8],
         should_sign: bool,
     ) -> Result<Response<ResponseBody>, String> {
-        let user_agent = random_user_agent();
         let dede_user_id = random_dede_user_id();
         let dede_ck_md5 = random_dede_ck_md5();
 
@@ -531,12 +581,13 @@ impl BiliproxyState {
             cookies.push(format!("SESSDATA={sessdata}"));
         }
 
+        let (client, user_agent) = self.ipv6_pool.get_random_client();
         let request_builder = match *method {
-            Method::GET => self.http_client.get(&url),
-            Method::POST => self.http_client.post(&url).body(body.to_vec()),
-            Method::PUT => self.http_client.put(&url).body(body.to_vec()),
-            Method::DELETE => self.http_client.delete(&url),
-            _ => self.http_client.get(&url),
+            Method::GET => client.get(&url),
+            Method::POST => client.post(&url).body(body.to_vec()),
+            Method::PUT => client.put(&url).body(body.to_vec()),
+            Method::DELETE => client.delete(&url),
+            _ => client.get(&url),
         };
 
         let response = request_builder
@@ -810,8 +861,10 @@ fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Respons
 pub async fn start_biliproxy(
     bind_addr: SocketAddr,
     sessdata: Option<String>,
+    ipv6: Ipv6Addr,
+    prefix_len: u8,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let state = Arc::new(BiliproxyState::new(sessdata));
+    let state = Arc::new(BiliproxyState::new(sessdata, ipv6, prefix_len));
     let listener = TcpListener::bind(bind_addr).await?;
 
     println!("Biliproxy listening on {bind_addr}");

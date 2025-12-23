@@ -154,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sessdata = opt.sessdata;
         async move {
             if let Some(addr) = biliproxy_addr {
-                biliproxy::start_biliproxy(addr, sessdata)
+                biliproxy::start_biliproxy(addr, sessdata, ipv6, prefix_len)
                     .await
                     .map_err(|e| e.to_string())
             } else {
