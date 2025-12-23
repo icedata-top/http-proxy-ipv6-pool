@@ -6,8 +6,10 @@ use hyper::{
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::net::{Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::{
+    net::{Ipv6Addr, SocketAddr},
+    sync::Arc,
+};
 use tokio::sync::RwLock;
 
 /// Shared state for the stable IPv6 address

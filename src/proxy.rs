@@ -7,8 +7,10 @@ use hyper::{
     service::{make_service_fn, service_fn},
 };
 use rand::Rng;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs};
-use std::sync::Arc;
+use std::{
+    net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs},
+    sync::Arc,
+};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpSocket,

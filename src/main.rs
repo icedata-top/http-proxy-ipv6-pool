@@ -1,6 +1,8 @@
 use clap::Parser;
-use std::net::{Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::{
+    net::{Ipv6Addr, SocketAddr},
+    sync::Arc,
+};
 use tokio::sync::RwLock;
 
 mod controller;
