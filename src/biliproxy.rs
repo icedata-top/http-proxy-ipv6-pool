@@ -135,7 +135,11 @@ fn generate_random_ipv6(ipv6_base: u128, prefix_len: u8) -> Ipv6Addr {
 /// Each client has a fixed User-Agent for more realistic behavior
 struct Ipv6Pool {
     /// Each entry is (reqwest::Client, fixed User-Agent)
-    clients: Vec<(reqwest::Client, String)>,
+    clients: RwLock<Vec<(reqwest::Client, String)>>,
+    /// Config for creating new clients during rotation
+    ipv6_base: u128,
+    prefix_len: u8,
+    timeout: Duration,
 }
 
 impl Ipv6Pool {
@@ -157,13 +161,37 @@ impl Ipv6Pool {
             })
             .collect();
         println!("IPv6 pool initialized with {} clients", clients.len());
-        Self { clients }
+        Self {
+            clients: RwLock::new(clients),
+            ipv6_base,
+            prefix_len,
+            timeout,
+        }
     }
 
-    /// Get a random client with its fixed User-Agent
-    fn get_random_client(&self) -> (&reqwest::Client, &str) {
-        let idx = rand::thread_rng().gen_range(0..self.clients.len());
-        (&self.clients[idx].0, &self.clients[idx].1)
+    /// Get a random client with its fixed User-Agent (returns cloned values)
+    fn get_random_client(&self) -> (reqwest::Client, String) {
+        let clients = self.clients.read();
+        let idx = rand::thread_rng().gen_range(0..clients.len());
+        (clients[idx].0.clone(), clients[idx].1.clone())
+    }
+
+    /// 1/128 chance to rotate a random client
+    fn maybe_rotate(&self) {
+        if rand::thread_rng().gen_range(0..128) == 0 {
+            let ip = generate_random_ipv6(self.ipv6_base, self.prefix_len);
+            let ua = random_user_agent();
+            let client = reqwest::Client::builder()
+                .local_address(IpAddr::V6(ip))
+                .timeout(self.timeout)
+                .build()
+                .expect("Failed to create client");
+
+            let mut clients = self.clients.write();
+            let idx = rand::thread_rng().gen_range(0..clients.len());
+            clients[idx] = (client, ua);
+            println!("🔄 Rotated pool slot {idx} to new IP: {ip}");
+        }
     }
 }
 
@@ -450,6 +478,7 @@ impl BiliproxyState {
             .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
             .header(ACCESS_CONTROL_ALLOW_METHODS, "GET, OPTIONS");
 
+        self.ipv6_pool.maybe_rotate();
         builder
             .body(full(body))
             .map_err(|e| format!("Failed to build cover response: {e}"))
@@ -474,6 +503,7 @@ impl BiliproxyState {
                 Ok(response) => {
                     let status = response.status();
                     if status == StatusCode::OK || status == StatusCode::NOT_FOUND {
+                        self.ipv6_pool.maybe_rotate();
                         return Ok(response);
                     }
 
@@ -487,6 +517,7 @@ impl BiliproxyState {
                         continue;
                     }
 
+                    self.ipv6_pool.maybe_rotate();
                     return Ok(response);
                 }
                 Err(e) => {
@@ -499,6 +530,7 @@ impl BiliproxyState {
             }
         }
 
+        self.ipv6_pool.maybe_rotate();
         Err("Max retries exceeded".to_string())
     }
 
