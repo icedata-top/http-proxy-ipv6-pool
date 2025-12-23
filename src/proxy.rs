@@ -7,6 +7,7 @@ use hyper::{
 };
 use rand::Rng;
 use std::{
+    io::{Error as IoError, ErrorKind},
     net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs},
     sync::Arc,
 };
@@ -18,12 +19,15 @@ use tokio::{
 
 use crate::auth;
 
+/// Shared state for the stable IPv6 address
+pub type StableIpv6State = Arc<RwLock<Ipv6Addr>>;
+
 pub async fn start_proxy(
     listen_addr: SocketAddr,
     (ipv6, prefix_len): (Ipv6Addr, u8),
     username: String,
     password: String,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let make_service = make_service_fn(move |_: &AddrStream| {
         let username = username.clone();
         let password = password.clone();
@@ -59,7 +63,8 @@ pub(crate) struct Proxy {
 
 impl Proxy {
     pub(crate) async fn proxy(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
-        if !auth::authenticate_basic(&req, "proxy-authorization", &self.username, &self.password) {
+        // Use hyper constant via shared auth module
+        if !auth::authenticate_proxy_authorization(&req, &self.username, &self.password) {
             return Ok(Response::builder()
                 .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
                 .header(
@@ -70,7 +75,6 @@ impl Proxy {
                 .unwrap());
         }
 
-        // Simplified: direct return instead of redundant match
         if req.method() == Method::CONNECT {
             self.process_connect(req).await
         } else {
@@ -119,23 +123,30 @@ impl Proxy {
     where
         A: AsyncRead + AsyncWrite + Unpin + ?Sized,
     {
-        if let Ok(addrs) = addr_str.to_socket_addrs() {
-            for addr in addrs {
-                let socket = TcpSocket::new_v6()?;
-                let bind_addr = get_rand_ipv6_socket_addr(self.ipv6, self.prefix_len);
-                if socket.bind(bind_addr).is_ok() {
-                    println!("{addr_str} via {bind_addr}");
-                    if let Ok(mut server) = socket.connect(addr).await {
-                        tokio::io::copy_bidirectional(upgraded, &mut server).await?;
-                        return Ok(());
-                    }
+        let addrs = match addr_str.to_socket_addrs() {
+            Ok(addrs) => addrs,
+            Err(e) => {
+                eprintln!("Failed to resolve {}: {}", addr_str, e);
+                return Err(e);
+            }
+        };
+
+        for addr in addrs {
+            let socket = TcpSocket::new_v6()?;
+            let bind_addr = get_rand_ipv6_socket_addr(self.ipv6, self.prefix_len);
+            if socket.bind(bind_addr).is_ok() {
+                println!("{addr_str} via {bind_addr}");
+                if let Ok(mut server) = socket.connect(addr).await {
+                    tokio::io::copy_bidirectional(upgraded, &mut server).await?;
+                    return Ok(());
                 }
             }
-        } else {
-            eprintln!("Failed to resolve: {addr_str}");
         }
 
-        Ok(())
+        Err(IoError::new(
+            ErrorKind::ConnectionRefused,
+            format!("Failed to connect to {}", addr_str),
+        ))
     }
 }
 
@@ -144,16 +155,22 @@ fn get_rand_ipv6_socket_addr(ipv6: u128, prefix_len: u8) -> SocketAddr {
     SocketAddr::new(get_rand_ipv6(ipv6, prefix_len), rng.gen::<u16>())
 }
 
-fn get_rand_ipv6(mut ipv6: u128, prefix_len: u8) -> IpAddr {
-    let rand: u128 = rand::thread_rng().gen();
-    let net_part = (ipv6 >> (128 - prefix_len)) << (128 - prefix_len);
-    let host_part = (rand << prefix_len) >> prefix_len;
-    ipv6 = net_part | host_part;
-    IpAddr::V6(ipv6.into())
-}
+/// Generate a random IPv6 address within the subnet.
+/// Handles edge cases for prefix_len 0 and 128.
+fn get_rand_ipv6(ipv6: u128, prefix_len: u8) -> IpAddr {
+    if prefix_len == 0 {
+        return IpAddr::V6(Ipv6Addr::from(rand::thread_rng().gen::<u128>()));
+    }
+    if prefix_len >= 128 {
+        return IpAddr::V6(Ipv6Addr::from(ipv6));
+    }
 
-/// Shared state for the stable IPv6 address
-pub type StableIpv6State = Arc<RwLock<Ipv6Addr>>;
+    let rand_val: u128 = rand::thread_rng().gen();
+    let shift_amount = 128 - prefix_len;
+    let net_part = (ipv6 >> shift_amount) << shift_amount;
+    let host_part = (rand_val << prefix_len) >> prefix_len;
+    IpAddr::V6(Ipv6Addr::from(net_part | host_part))
+}
 
 /// Start a stable proxy server that uses a fixed IPv6 address from shared state
 pub async fn start_stable_proxy(
@@ -196,7 +213,8 @@ struct StableProxy {
 
 impl StableProxy {
     async fn proxy(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
-        if !auth::authenticate_basic(&req, "proxy-authorization", &self.username, &self.password) {
+        // Use hyper constant via shared auth module
+        if !auth::authenticate_proxy_authorization(&req, &self.username, &self.password) {
             return Ok(Response::builder()
                 .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
                 .header(
@@ -207,7 +225,6 @@ impl StableProxy {
                 .unwrap());
         }
 
-        // Simplified: direct return instead of redundant match
         if req.method() == Method::CONNECT {
             self.process_connect(req).await
         } else {
@@ -216,7 +233,6 @@ impl StableProxy {
     }
 
     async fn process_connect(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
-        // Read stable IP before spawning to avoid Send issues
         let stable_ip = *self.state.read().await;
         tokio::task::spawn(async move {
             let remote_addr = match req.uri().authority() {
@@ -268,23 +284,29 @@ impl StableProxy {
     where
         A: AsyncRead + AsyncWrite + Unpin + ?Sized,
     {
-        if let Ok(addrs) = addr_str.to_socket_addrs() {
-            for addr in addrs {
-                let socket = TcpSocket::new_v6()?;
-                // Use rand::random() instead of thread_rng().gen() for Send compatibility
-                let bind_addr = SocketAddr::new(IpAddr::V6(stable_ip), rand::random::<u16>());
-                if socket.bind(bind_addr).is_ok() {
-                    println!("[stable] {addr_str} via {bind_addr}");
-                    if let Ok(mut server) = socket.connect(addr).await {
-                        tokio::io::copy_bidirectional(upgraded, &mut server).await?;
-                        return Ok(());
-                    }
+        let addrs = match addr_str.to_socket_addrs() {
+            Ok(addrs) => addrs,
+            Err(e) => {
+                eprintln!("[stable] Failed to resolve {}: {}", addr_str, e);
+                return Err(e);
+            }
+        };
+
+        for addr in addrs {
+            let socket = TcpSocket::new_v6()?;
+            let bind_addr = SocketAddr::new(IpAddr::V6(stable_ip), rand::random::<u16>());
+            if socket.bind(bind_addr).is_ok() {
+                println!("[stable] {addr_str} via {bind_addr}");
+                if let Ok(mut server) = socket.connect(addr).await {
+                    tokio::io::copy_bidirectional(upgraded, &mut server).await?;
+                    return Ok(());
                 }
             }
-        } else {
-            eprintln!("[stable] Failed to resolve: {addr_str}");
         }
 
-        Ok(())
+        Err(IoError::new(
+            ErrorKind::ConnectionRefused,
+            format!("[stable] Failed to connect to {}", addr_str),
+        ))
     }
 }

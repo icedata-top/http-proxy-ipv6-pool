@@ -5,16 +5,9 @@ use hyper::{
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::{
-    net::{Ipv6Addr, SocketAddr},
-    sync::Arc,
-};
-use tokio::sync::RwLock;
+use std::net::{Ipv6Addr, SocketAddr};
 
-use crate::auth;
-
-/// Shared state for the stable IPv6 address
-pub type StableIpv6State = Arc<RwLock<Ipv6Addr>>;
+use crate::{auth, proxy::StableIpv6State};
 
 #[derive(Serialize)]
 struct IpResponse {
@@ -31,13 +24,40 @@ struct ErrorResponse {
     error: String,
 }
 
-/// Generate a random IPv6 address within the given subnet
+/// Generate a random IPv6 address within the given subnet.
+/// Handles edge case where prefix_len is 0 (entire address is random).
 pub fn generate_random_ipv6(ipv6_base: u128, prefix_len: u8) -> Ipv6Addr {
-    let rand: u128 = rand::thread_rng().gen();
-    let net_part = (ipv6_base >> (128 - prefix_len)) << (128 - prefix_len);
-    let host_part = (rand << prefix_len) >> prefix_len;
-    let ipv6 = net_part | host_part;
-    Ipv6Addr::from(ipv6)
+    if prefix_len == 0 {
+        // All bits are host part - return completely random IPv6
+        return Ipv6Addr::from(rand::thread_rng().gen::<u128>());
+    }
+    if prefix_len >= 128 {
+        // All bits are network part - return base address
+        return Ipv6Addr::from(ipv6_base);
+    }
+
+    let rand_val: u128 = rand::thread_rng().gen();
+    let shift_amount = 128 - prefix_len;
+    let net_part = (ipv6_base >> shift_amount) << shift_amount;
+    let host_part = (rand_val << prefix_len) >> prefix_len;
+    Ipv6Addr::from(net_part | host_part)
+}
+
+/// Validate that an IPv6 address is within the configured subnet.
+/// Handles edge case where prefix_len is 0 (any address is valid).
+fn validate_subnet(ip: Ipv6Addr, base: u128, prefix_len: u8) -> bool {
+    if prefix_len == 0 {
+        return true; // Any IP is valid when prefix is /0
+    }
+    if prefix_len >= 128 {
+        return u128::from(ip) == base;
+    }
+
+    let ip_u128: u128 = ip.into();
+    let shift_amount = 128 - prefix_len;
+    let net_part_ip = (ip_u128 >> shift_amount) << shift_amount;
+    let net_part_base = (base >> shift_amount) << shift_amount;
+    net_part_ip == net_part_base
 }
 
 /// Start the controller HTTP server
@@ -82,8 +102,8 @@ async fn handle_request(
     username: String,
     password: String,
 ) -> Result<Response<Body>, hyper::Error> {
-    // Check authentication using shared auth module
-    if !auth::authenticate_basic(&req, "authorization", &username, &password) {
+    // Check authentication using shared auth module with hyper constant
+    if !auth::authenticate_authorization(&req, &username, &password) {
         return Ok(Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header(
@@ -120,42 +140,33 @@ async fn handle_request(
         (&Method::POST, "/set") => {
             let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
             match serde_json::from_slice::<SetIpRequest>(&body_bytes) {
-                Ok(set_req) => {
-                    match set_req.ip.parse::<Ipv6Addr>() {
-                        Ok(new_ip) => {
-                            // Validate the IP is within the subnet
-                            let new_ip_u128: u128 = new_ip.into();
-                            let net_part_new =
-                                (new_ip_u128 >> (128 - prefix_len)) << (128 - prefix_len);
-                            let net_part_base =
-                                (ipv6_base >> (128 - prefix_len)) << (128 - prefix_len);
-
-                            if net_part_new != net_part_base {
-                                let response = ErrorResponse {
-                                    error: "IP address is not within the configured subnet"
-                                        .to_string(),
-                                };
-                                return Ok(json_response(StatusCode::BAD_REQUEST, &response));
-                            }
-
-                            {
-                                let mut ip = state.write().await;
-                                *ip = new_ip;
-                            }
-                            println!("Set stable IPv6 to: {}", new_ip);
-                            let response = IpResponse {
-                                ip: new_ip.to_string(),
-                            };
-                            Ok(json_response(StatusCode::OK, &response))
-                        }
-                        Err(_) => {
+                Ok(set_req) => match set_req.ip.parse::<Ipv6Addr>() {
+                    Ok(new_ip) => {
+                        // Validate the IP is within the subnet
+                        if !validate_subnet(new_ip, ipv6_base, prefix_len) {
                             let response = ErrorResponse {
-                                error: "Invalid IPv6 address format".to_string(),
+                                error: "IP address is not within the configured subnet".to_string(),
                             };
-                            Ok(json_response(StatusCode::BAD_REQUEST, &response))
+                            return Ok(json_response(StatusCode::BAD_REQUEST, &response));
                         }
+
+                        {
+                            let mut ip = state.write().await;
+                            *ip = new_ip;
+                        }
+                        println!("Set stable IPv6 to: {}", new_ip);
+                        let response = IpResponse {
+                            ip: new_ip.to_string(),
+                        };
+                        Ok(json_response(StatusCode::OK, &response))
                     }
-                }
+                    Err(_) => {
+                        let response = ErrorResponse {
+                            error: "Invalid IPv6 address format".to_string(),
+                        };
+                        Ok(json_response(StatusCode::BAD_REQUEST, &response))
+                    }
+                },
                 Err(_) => {
                     let response = ErrorResponse {
                         error: "Invalid JSON body. Expected: {\"ip\": \"...\"}".to_string(),

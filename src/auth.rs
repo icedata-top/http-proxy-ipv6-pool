@@ -1,17 +1,43 @@
 //! Shared authentication utilities
 
 use base64::Engine;
-use hyper::{Request, header::HeaderValue};
+use hyper::{
+    Request,
+    header::{AUTHORIZATION, HeaderName, HeaderValue, PROXY_AUTHORIZATION},
+};
 
-/// Authenticate a request using HTTP Basic Auth.
+/// Authenticate a request using HTTP Basic Auth with the Authorization header.
 /// Returns true if credentials match, false otherwise.
-pub fn authenticate_basic<B>(
+pub fn authenticate_authorization<B>(
     req: &Request<B>,
-    auth_header_name: impl AsRef<str>,
     expected_username: &str,
     expected_password: &str,
 ) -> bool {
-    let header_name = auth_header_name.as_ref();
+    authenticate_with_header(req, AUTHORIZATION, expected_username, expected_password)
+}
+
+/// Authenticate a request using HTTP Basic Auth with the Proxy-Authorization header.
+/// Returns true if credentials match, false otherwise.
+pub fn authenticate_proxy_authorization<B>(
+    req: &Request<B>,
+    expected_username: &str,
+    expected_password: &str,
+) -> bool {
+    authenticate_with_header(
+        req,
+        PROXY_AUTHORIZATION,
+        expected_username,
+        expected_password,
+    )
+}
+
+/// Authenticate a request using HTTP Basic Auth with a specified header.
+fn authenticate_with_header<B>(
+    req: &Request<B>,
+    header_name: HeaderName,
+    expected_username: &str,
+    expected_password: &str,
+) -> bool {
     if let Some(auth_header) = req.headers().get(header_name) {
         return validate_basic_auth(auth_header, expected_username, expected_password);
     }

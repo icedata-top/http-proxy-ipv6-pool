@@ -50,12 +50,24 @@ fn parse_ipv6_cidr(s: &str) -> Result<(Ipv6Addr, u8), String> {
 }
 
 fn parse_auth(s: &str) -> Result<(String, String), String> {
-    let parts: Vec<&str> = s.split(':').collect();
+    // Use splitn(2, ':') to allow colons in password
+    let parts: Vec<&str> = s.splitn(2, ':').collect();
     if parts.len() != 2 {
         return Err("Invalid auth format. Expected format: username:password".into());
     }
 
-    Ok((parts[0].to_string(), parts[1].to_string()))
+    let username = parts[0];
+    let password = parts[1];
+
+    // Validate that username and password are not empty
+    if username.is_empty() {
+        return Err("Username cannot be empty".into());
+    }
+    if password.is_empty() {
+        return Err("Password cannot be empty".into());
+    }
+
+    Ok((username.to_string(), password.to_string()))
 }
 
 #[tokio::main]
@@ -84,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         async move {
             proxy::start_proxy(opt.bind, (ipv6, prefix_len), username, password)
                 .await
-                .map_err(|e| format!("Random proxy error: {}", e))
+                .map_err(|e| e.to_string())
         }
     };
 
@@ -97,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let (Some(stable_addr), Some(state)) = (opt.stable_bind, state) {
                 proxy::start_stable_proxy(stable_addr, state, username, password)
                     .await
-                    .map_err(|e| format!("Stable proxy error: {}", e))
+                    .map_err(|e| e.to_string())
             } else {
                 Ok(())
             }
@@ -120,18 +132,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     password,
                 )
                 .await
-                .map_err(|e| format!("Controller error: {}", e))
+                .map_err(|e| e.to_string())
             } else {
                 Ok(())
             }
         }
     };
 
-    // Run all services concurrently
-    let (r1, r2, r3) = tokio::join!(random_proxy, stable_proxy, controller_server);
-    r1?;
-    r2?;
-    r3?;
+    // Run all services concurrently - use try_join for better error handling
+    // This will return immediately when any service fails
+    tokio::try_join!(random_proxy, stable_proxy, controller_server)?;
 
     Ok(())
 }
