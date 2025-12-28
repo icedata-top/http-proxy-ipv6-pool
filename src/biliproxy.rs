@@ -22,9 +22,6 @@ use hyper_util::rt::TokioIo;
 use lazy_static::lazy_static;
 use md5::{Digest, Md5};
 use parking_lot::RwLock;
-use prometheus::{
-    Encoder, HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry, TextEncoder,
-};
 use rand::Rng;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -78,33 +75,6 @@ lazy_static! {
         Regex::new(r"/sitemap").unwrap(),
         Regex::new(r"favicon\.ico$").unwrap(),
     ];
-
-
-
-    /// Prometheus metrics registry
-    static ref METRICS_REGISTRY: Registry = Registry::new();
-
-    /// HTTP request duration histogram
-    static ref HTTP_REQUEST_DURATION_MS: HistogramVec = {
-        let opts = HistogramOpts::new(
-            "biliproxy_http_request_duration_ms",
-            "HTTP request duration in milliseconds"
-        ).buckets(vec![10.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0]);
-        let histogram = HistogramVec::new(opts, &["method", "route", "status"]).unwrap();
-        METRICS_REGISTRY.register(Box::new(histogram.clone())).unwrap();
-        histogram
-    };
-
-    /// HTTP response bytes counter
-    static ref HTTP_RESPONSE_BYTES_TOTAL: IntCounterVec = {
-        let opts = Opts::new(
-            "biliproxy_http_response_bytes_total",
-            "Total HTTP response bytes"
-        );
-        let counter = IntCounterVec::new(opts, &["method", "route", "status"]).unwrap();
-        METRICS_REGISTRY.register(Box::new(counter.clone())).unwrap();
-        counter
-    };
 }
 
 /// WBI keys structure
@@ -756,23 +726,17 @@ async fn handle_request(
 
     let response = handle_request_inner(req, state).await;
 
-    // Record metrics
-    let status = response.status().as_u16().to_string();
+    // Record metrics using the shared metrics module
+    let status = response.status().as_u16();
     let duration_ms = start.elapsed().as_millis() as f64;
 
-    HTTP_REQUEST_DURATION_MS
-        .with_label_values(&[&method_str, &route, &status])
-        .observe(duration_ms);
+    let bytes = response
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
 
-    if let Some(content_length) = response.headers().get("content-length") {
-        if let Ok(len_str) = content_length.to_str() {
-            if let Ok(len) = len_str.parse::<u64>() {
-                HTTP_RESPONSE_BYTES_TOTAL
-                    .with_label_values(&[&method_str, &route, &status])
-                    .inc_by(len);
-            }
-        }
-    }
+    crate::metrics::record_request("biliproxy", &method_str, &route, status, duration_ms, bytes);
 
     Ok(response)
 }
@@ -847,18 +811,6 @@ async fn handle_request_inner(
                 },
             ),
         },
-
-        (Method::GET, "/metrics") => {
-            let encoder = TextEncoder::new();
-            let metric_families = METRICS_REGISTRY.gather();
-            let mut buffer = Vec::new();
-            encoder.encode(&metric_families, &mut buffer).unwrap();
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(CONTENT_TYPE, encoder.format_type())
-                .body(full(buffer))
-                .unwrap()
-        }
 
         (Method::GET, "/robots.txt") => Response::builder()
             .status(StatusCode::OK)

@@ -127,16 +127,45 @@ async fn handle_request(
     username: String,
     password: String,
 ) -> Result<Response<ResponseBody>, Infallible> {
+    let start = std::time::Instant::now();
+    let method_str = req.method().to_string();
+    let path = req.uri().path().to_string();
+
+    let response =
+        handle_request_inner(req, state, ipv6_base, prefix_len, username, password).await;
+
+    // Record metrics
+    let status = response.status().as_u16();
+    let duration_ms = start.elapsed().as_millis() as f64;
+    let bytes = response
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    crate::metrics::record_request("controller", &method_str, &path, status, duration_ms, bytes);
+
+    Ok(response)
+}
+
+async fn handle_request_inner(
+    req: Request<Incoming>,
+    state: StableIpv6State,
+    ipv6_base: u128,
+    prefix_len: u8,
+    username: String,
+    password: String,
+) -> Response<ResponseBody> {
     // Check authentication using shared auth module with hyper constant
     if !auth::authenticate_authorization(&req, &username, &password) {
-        return Ok(Response::builder()
+        return Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header(
                 WWW_AUTHENTICATE,
                 HeaderValue::from_static("Basic realm=\"Controller\""),
             )
             .body(empty())
-            .unwrap());
+            .unwrap();
     }
 
     let path = req.uri().path();
@@ -146,7 +175,7 @@ async fn handle_request(
         (&Method::GET, "/ip") => {
             let ip = state.read().await;
             let response = IpResponse { ip: ip.to_string() };
-            Ok(json_response(StatusCode::OK, &response))
+            json_response(StatusCode::OK, &response)
         }
 
         (&Method::POST, "/rotate") => {
@@ -159,7 +188,7 @@ async fn handle_request(
             let response = IpResponse {
                 ip: new_ip.to_string(),
             };
-            Ok(json_response(StatusCode::OK, &response))
+            json_response(StatusCode::OK, &response)
         }
 
         (&Method::POST, "/set") => {
@@ -170,7 +199,7 @@ async fn handle_request(
                     let response = ErrorResponse {
                         error: "Failed to read request body".to_string(),
                     };
-                    return Ok(json_response(StatusCode::BAD_REQUEST, &response));
+                    return json_response(StatusCode::BAD_REQUEST, &response);
                 }
             };
 
@@ -182,7 +211,7 @@ async fn handle_request(
                             let response = ErrorResponse {
                                 error: "IP address is not within the configured subnet".to_string(),
                             };
-                            return Ok(json_response(StatusCode::BAD_REQUEST, &response));
+                            return json_response(StatusCode::BAD_REQUEST, &response);
                         }
 
                         {
@@ -193,20 +222,20 @@ async fn handle_request(
                         let response = IpResponse {
                             ip: new_ip.to_string(),
                         };
-                        Ok(json_response(StatusCode::OK, &response))
+                        json_response(StatusCode::OK, &response)
                     }
                     Err(_) => {
                         let response = ErrorResponse {
                             error: "Invalid IPv6 address format".to_string(),
                         };
-                        Ok(json_response(StatusCode::BAD_REQUEST, &response))
+                        json_response(StatusCode::BAD_REQUEST, &response)
                     }
                 },
                 Err(_) => {
                     let response = ErrorResponse {
                         error: "Invalid JSON body. Expected: {\"ip\": \"...\"}".to_string(),
                     };
-                    Ok(json_response(StatusCode::BAD_REQUEST, &response))
+                    json_response(StatusCode::BAD_REQUEST, &response)
                 }
             }
         }
@@ -216,7 +245,7 @@ async fn handle_request(
                 error: "Not found. Available endpoints: GET /ip, POST /rotate, POST /set"
                     .to_string(),
             };
-            Ok(json_response(StatusCode::NOT_FOUND, &response))
+            json_response(StatusCode::NOT_FOUND, &response)
         }
     }
 }

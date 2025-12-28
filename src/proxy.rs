@@ -125,12 +125,15 @@ impl Proxy {
             Some(auth) => auth.to_string(),
             None => {
                 eprintln!("CONNECT request missing authority");
+                crate::metrics::record_proxy_connection("random", false);
                 return Ok(Response::builder()
                     .status(StatusCode::BAD_REQUEST)
                     .body(full("CONNECT missing authority"))
                     .unwrap());
             }
         };
+
+        crate::metrics::record_proxy_connection("random", true);
 
         tokio::task::spawn(async move {
             match hyper::upgrade::on(req).await {
@@ -190,8 +193,12 @@ impl Proxy {
                 println!("{addr_str} via {bind_addr}");
                 if let Ok(mut server) = socket.connect(addr).await {
                     let mut upgraded = TokioIo::new(upgraded);
-                    tokio::io::copy_bidirectional(&mut upgraded, &mut server).await?;
-                    return Ok(());
+                    let result = tokio::io::copy_bidirectional(&mut upgraded, &mut server).await;
+                    if let Ok((upload, download)) = result {
+                        crate::metrics::record_proxy_bandwidth("upload", "random", upload);
+                        crate::metrics::record_proxy_bandwidth("download", "random", download);
+                    }
+                    return result.map(|_| ());
                 }
             }
         }
@@ -303,12 +310,15 @@ impl StableProxy {
             Some(auth) => auth.to_string(),
             None => {
                 eprintln!("[stable] CONNECT request missing authority");
+                crate::metrics::record_proxy_connection("stable", false);
                 return Ok(Response::builder()
                     .status(StatusCode::BAD_REQUEST)
                     .body(full("CONNECT missing authority"))
                     .unwrap());
             }
         };
+
+        crate::metrics::record_proxy_connection("stable", true);
 
         tokio::task::spawn(async move {
             match hyper::upgrade::on(req).await {
@@ -376,8 +386,12 @@ impl StableProxy {
                 println!("[stable] {addr_str} via {bind_addr}");
                 if let Ok(mut server) = socket.connect(addr).await {
                     let mut upgraded = TokioIo::new(upgraded);
-                    tokio::io::copy_bidirectional(&mut upgraded, &mut server).await?;
-                    return Ok(());
+                    let result = tokio::io::copy_bidirectional(&mut upgraded, &mut server).await;
+                    if let Ok((upload, download)) = result {
+                        crate::metrics::record_proxy_bandwidth("upload", "stable", upload);
+                        crate::metrics::record_proxy_bandwidth("download", "stable", download);
+                    }
+                    return result.map(|_| ());
                 }
             }
         }
