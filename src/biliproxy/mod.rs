@@ -40,11 +40,10 @@ use tokio::net::TcpListener;
 /// Start the biliproxy server
 pub async fn start_biliproxy(
     bind_addr: SocketAddr,
-    sessdata: Option<String>,
     ipv6: Ipv6Addr,
     prefix_len: u8,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let state = Arc::new(BiliproxyState::new(sessdata, ipv6, prefix_len));
+    let state = Arc::new(BiliproxyState::new(ipv6, prefix_len));
     let listener = TcpListener::bind(bind_addr).await?;
 
     println!("Biliproxy listening on {bind_addr}");
@@ -162,11 +161,7 @@ async fn handle_request_inner(
 
         (Method::GET, "/debug/wbi-keys") => {
             let (client, user_agent, _) = state.ipv6_pool.get_random_client();
-            match state
-                .wbi_manager
-                .get_keys_info(&client, &user_agent, state.sessdata.as_deref())
-                .await
-            {
+            match state.wbi_manager.get_keys_info(&client, &user_agent).await {
                 Ok(info) => json_response(StatusCode::OK, &info),
                 Err(e) => json_response(
                     StatusCode::INTERNAL_SERVER_ERROR,

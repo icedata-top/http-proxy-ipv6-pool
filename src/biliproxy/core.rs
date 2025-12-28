@@ -19,17 +19,15 @@ pub const MAX_RETRIES: u32 = 5;
 /// Shared state for the biliproxy server
 pub struct BiliproxyState {
     pub(crate) wbi_manager: WbiManager,
-    pub(crate) sessdata: Option<String>,
     pub(crate) ipv6_pool: Ipv6Pool,
 }
 
 impl BiliproxyState {
-    pub fn new(sessdata: Option<String>, ipv6: Ipv6Addr, prefix_len: u8) -> Self {
+    pub fn new(ipv6: Ipv6Addr, prefix_len: u8) -> Self {
         let ipv6_pool = Ipv6Pool::new(ipv6.into(), prefix_len, DEFAULT_TIMEOUT);
 
         Self {
             wbi_manager: WbiManager::new(),
-            sessdata,
             ipv6_pool,
         }
     }
@@ -185,7 +183,7 @@ impl BiliproxyState {
         let (client, user_agent) = self.ipv6_pool.get_client_by_index(pool_index);
         let final_params = if should_sign && *method == Method::GET {
             self.wbi_manager
-                .sign(query_params, &client, &user_agent, self.sessdata.as_deref())
+                .sign(query_params, &client, &user_agent)
                 .await?
         } else {
             query_params.clone()
@@ -202,13 +200,8 @@ impl BiliproxyState {
             format!("{target_url}?{query_string}")
         };
 
-        let mut cookies = vec![
-            format!("DedeUserID={}", dede_user_id),
-            format!("DedeUserID__ckMd5={}", dede_ck_md5),
-        ];
-        if let Some(ref sessdata) = self.sessdata {
-            cookies.push(format!("SESSDATA={sessdata}"));
-        }
+        let cookies = [format!("DedeUserID={dede_user_id}"),
+            format!("DedeUserID__ckMd5={dede_ck_md5}")];
 
         let request_builder = match *method {
             Method::GET => client.get(&url),

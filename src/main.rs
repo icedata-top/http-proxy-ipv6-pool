@@ -38,10 +38,6 @@ struct Opt {
     #[arg(long = "biliproxy")]
     biliproxy: Option<SocketAddr>,
 
-    /// Bilibili SESSDATA cookie for authenticated requests (optional)
-    #[arg(long = "sessdata", env = "BILIBILI_SESSDATA")]
-    sessdata: Option<String>,
-
     /// Bind address for metrics server (optional, e.g. 127.0.0.1:9090)
     #[arg(short = 'm', long = "metrics")]
     metrics: Option<SocketAddr>,
@@ -156,10 +152,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start biliproxy (optional)
     let biliproxy_server = {
         let biliproxy_addr = opt.biliproxy;
-        let sessdata = opt.sessdata;
         async move {
             if let Some(addr) = biliproxy_addr {
-                biliproxy::start_biliproxy(addr, sessdata, ipv6, prefix_len)
+                biliproxy::start_biliproxy(addr, ipv6, prefix_len)
                     .await
                     .map_err(|e| e.to_string())
             } else {

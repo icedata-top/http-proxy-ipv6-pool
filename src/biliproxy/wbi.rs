@@ -52,7 +52,6 @@ impl WbiManager {
         &self,
         client: &reqwest::Client,
         user_agent: &str,
-        sessdata: Option<&str>,
     ) -> Result<(String, String), String> {
         // Check cache first
         {
@@ -65,7 +64,7 @@ impl WbiManager {
         }
 
         // Fetch new keys
-        let new_keys = fetch_wbi_keys(client, user_agent, sessdata).await?;
+        let new_keys = fetch_wbi_keys(client, user_agent).await?;
         let result = (new_keys.img_key.clone(), new_keys.sub_key.clone());
 
         // Update cache
@@ -82,9 +81,8 @@ impl WbiManager {
         &self,
         client: &reqwest::Client,
         user_agent: &str,
-        sessdata: Option<&str>,
     ) -> Result<WbiKeysResponse, String> {
-        let (img_key, sub_key) = self.get_keys(client, user_agent, sessdata).await?;
+        let (img_key, sub_key) = self.get_keys(client, user_agent).await?;
 
         let (expires_at, expires_in) = {
             let cache = self.keys.read();
@@ -115,9 +113,8 @@ impl WbiManager {
         params: &HashMap<String, String>,
         client: &reqwest::Client,
         user_agent: &str,
-        sessdata: Option<&str>,
     ) -> Result<HashMap<String, String>, String> {
-        let (img_key, sub_key) = self.get_keys(client, user_agent, sessdata).await?;
+        let (img_key, sub_key) = self.get_keys(client, user_agent).await?;
         Ok(sign_params(params, &img_key, &sub_key))
     }
 }
@@ -129,18 +126,10 @@ impl Default for WbiManager {
 }
 
 /// Fetch WBI keys from Bilibili API using provided client
-pub async fn fetch_wbi_keys(
-    client: &reqwest::Client,
-    user_agent: &str,
-    sessdata: Option<&str>,
-) -> Result<WbiKeys, String> {
-    let mut request = client.get(NAV_API_URL).header("User-Agent", user_agent);
-
-    if let Some(sessdata) = sessdata {
-        request = request.header("Cookie", format!("SESSDATA={sessdata}"));
-    }
-
-    let response = request
+pub async fn fetch_wbi_keys(client: &reqwest::Client, user_agent: &str) -> Result<WbiKeys, String> {
+    let response = client
+        .get(NAV_API_URL)
+        .header("User-Agent", user_agent)
         .send()
         .await
         .map_err(|e| format!("Failed to fetch WBI keys: {e}"))?;
