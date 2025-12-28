@@ -90,13 +90,22 @@ impl BiliproxyState {
         path: &str,
         query_params: HashMap<String, String>,
         body: Vec<u8>,
+        incoming_cookie: Option<String>,
     ) -> Result<Response<ResponseBody>, String> {
         let (target_url, should_sign) = self.determine_target(path);
         let (_, _, idx) = self.ipv6_pool.get_random_client();
 
         for attempt in 1..=MAX_RETRIES {
             let result = self
-                .do_proxy_request(idx, method, &target_url, &query_params, &body, should_sign)
+                .do_proxy_request(
+                    idx,
+                    method,
+                    &target_url,
+                    &query_params,
+                    &body,
+                    should_sign,
+                    incoming_cookie.as_deref(),
+                )
                 .await;
 
             match result {
@@ -164,10 +173,8 @@ impl BiliproxyState {
         query_params: &HashMap<String, String>,
         body: &[u8],
         should_sign: bool,
+        incoming_cookie: Option<&str>,
     ) -> Result<Response<ResponseBody>, String> {
-        let dede_user_id = random_dede_user_id();
-        let dede_ck_md5 = random_dede_ck_md5();
-
         let referer = if let Some(bvid) = query_params.get("bvid") {
             format!("https://www.bilibili.com/video/{bvid}")
         } else if let Some(avid) = query_params.get("avid") {
@@ -200,10 +207,14 @@ impl BiliproxyState {
             format!("{target_url}?{query_string}")
         };
 
-        let cookies = [
-            format!("DedeUserID={dede_user_id}"),
-            format!("DedeUserID__ckMd5={dede_ck_md5}"),
-        ];
+        // Use incoming cookie if provided, otherwise generate default
+        let cookie_header = if let Some(cookie) = incoming_cookie {
+            cookie.to_string()
+        } else {
+            let dede_user_id = random_dede_user_id();
+            let dede_ck_md5 = random_dede_ck_md5();
+            format!("DedeUserID={dede_user_id}; DedeUserID__ckMd5={dede_ck_md5}")
+        };
 
         let request_builder = match *method {
             Method::GET => client.get(&url),
@@ -217,7 +228,7 @@ impl BiliproxyState {
             .header("User-Agent", user_agent)
             .header("Referer", &referer)
             .header("Origin", &referer)
-            .header("Cookie", cookies.join("; "))
+            .header("Cookie", &cookie_header)
             .send()
             .await
             .map_err(|e| format!("Proxy request failed: {e}"))?;
