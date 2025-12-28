@@ -194,6 +194,13 @@ async fn handle_request_inner(
         }
 
         _ => {
+            // Extract Cookie header from incoming request
+            let incoming_cookie = req
+                .headers()
+                .get(http::header::COOKIE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+
             // Read body for non-GET requests
             let body_bytes = match req.into_body().collect().await {
                 Ok(collected) => collected.to_bytes().to_vec(),
@@ -203,7 +210,7 @@ async fn handle_request_inner(
             let query_params = parse_query_string(query.as_deref());
 
             match state
-                .proxy_request(&method, &path, query_params, body_bytes)
+                .proxy_request(&method, &path, query_params, body_bytes, incoming_cookie)
                 .await
             {
                 Ok(response) => response,

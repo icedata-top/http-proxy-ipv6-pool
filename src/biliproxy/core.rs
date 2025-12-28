@@ -200,8 +200,10 @@ impl BiliproxyState {
             format!("{target_url}?{query_string}")
         };
 
-        let cookies = [format!("DedeUserID={dede_user_id}"),
-            format!("DedeUserID__ckMd5={dede_ck_md5}")];
+        let cookies = [
+            format!("DedeUserID={dede_user_id}"),
+            format!("DedeUserID__ckMd5={dede_ck_md5}"),
+        ];
 
         let request_builder = match *method {
             Method::GET => client.get(&url),
