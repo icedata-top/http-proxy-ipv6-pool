@@ -1,13 +1,23 @@
-use hyper::{
-    Body, Method, Request, Response, Server, StatusCode,
+use bytes::Bytes;
+use http::{
+    Method, Request, Response, StatusCode,
     header::{HeaderValue, WWW_AUTHENTICATE},
-    service::{make_service_fn, service_fn},
 };
+use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
+use hyper::{body::Incoming, server::conn::http1 as server_http1, service::service_fn};
+use hyper_util::rt::TokioIo;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::net::{Ipv6Addr, SocketAddr};
+use std::{
+    convert::Infallible,
+    net::{Ipv6Addr, SocketAddr},
+};
+use tokio::net::TcpListener;
 
 use crate::{auth, proxy::StableIpv6State};
+
+/// Body type alias for responses
+type ResponseBody = BoxBody<Bytes, Infallible>;
 
 #[derive(Serialize)]
 struct IpResponse {
@@ -22,6 +32,16 @@ struct SetIpRequest {
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
+}
+
+/// Create an empty response body
+fn empty() -> ResponseBody {
+    Empty::<Bytes>::new().boxed()
+}
+
+/// Create a full response body from bytes
+fn full<T: Into<Bytes>>(chunk: T) -> ResponseBody {
+    Full::new(chunk.into()).boxed()
 }
 
 /// Generate a random IPv6 address within the given subnet.
@@ -69,49 +89,83 @@ pub async fn start_controller(
     username: String,
     password: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let make_service = make_service_fn(move |_| {
+    let listener = TcpListener::bind(bind_addr).await?;
+    println!("Controller listening on {bind_addr}");
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let io = TokioIo::new(stream);
         let state = state.clone();
         let username = username.clone();
         let password = password.clone();
-        async move {
-            Ok::<_, hyper::Error>(service_fn(move |req| {
-                handle_request(
-                    req,
-                    state.clone(),
-                    ipv6_base,
-                    prefix_len,
-                    username.clone(),
-                    password.clone(),
-                )
-            }))
-        }
-    });
 
-    println!("Controller listening on {}", bind_addr);
-    Server::bind(&bind_addr)
-        .serve(make_service)
-        .await
-        .map_err(|e| e.into())
+        tokio::spawn(async move {
+            let service = service_fn(move |req| {
+                let state = state.clone();
+                let username = username.clone();
+                let password = password.clone();
+                async move {
+                    handle_request(req, state, ipv6_base, prefix_len, username, password).await
+                }
+            });
+
+            if let Err(err) = server_http1::Builder::new()
+                .serve_connection(io, service)
+                .await
+            {
+                eprintln!("Controller connection error: {err}");
+            }
+        });
+    }
 }
 
 async fn handle_request(
-    req: Request<Body>,
+    req: Request<Incoming>,
     state: StableIpv6State,
     ipv6_base: u128,
     prefix_len: u8,
     username: String,
     password: String,
-) -> Result<Response<Body>, hyper::Error> {
+) -> Result<Response<ResponseBody>, Infallible> {
+    let start = std::time::Instant::now();
+    let method_str = req.method().to_string();
+    let path = req.uri().path().to_string();
+
+    let response =
+        handle_request_inner(req, state, ipv6_base, prefix_len, username, password).await;
+
+    // Record metrics
+    let status = response.status().as_u16();
+    let duration_ms = start.elapsed().as_millis() as f64;
+    let bytes = response
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    crate::metrics::record_request("controller", &method_str, &path, status, duration_ms, bytes);
+
+    Ok(response)
+}
+
+async fn handle_request_inner(
+    req: Request<Incoming>,
+    state: StableIpv6State,
+    ipv6_base: u128,
+    prefix_len: u8,
+    username: String,
+    password: String,
+) -> Response<ResponseBody> {
     // Check authentication using shared auth module with hyper constant
     if !auth::authenticate_authorization(&req, &username, &password) {
-        return Ok(Response::builder()
+        return Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header(
                 WWW_AUTHENTICATE,
                 HeaderValue::from_static("Basic realm=\"Controller\""),
             )
-            .body(Body::empty())
-            .unwrap());
+            .body(empty())
+            .unwrap();
     }
 
     let path = req.uri().path();
@@ -121,7 +175,7 @@ async fn handle_request(
         (&Method::GET, "/ip") => {
             let ip = state.read().await;
             let response = IpResponse { ip: ip.to_string() };
-            Ok(json_response(StatusCode::OK, &response))
+            json_response(StatusCode::OK, &response)
         }
 
         (&Method::POST, "/rotate") => {
@@ -130,15 +184,25 @@ async fn handle_request(
                 let mut ip = state.write().await;
                 *ip = new_ip;
             }
-            println!("Rotated stable IPv6 to: {}", new_ip);
+            println!("Rotated stable IPv6 to: {new_ip}");
             let response = IpResponse {
                 ip: new_ip.to_string(),
             };
-            Ok(json_response(StatusCode::OK, &response))
+            json_response(StatusCode::OK, &response)
         }
 
         (&Method::POST, "/set") => {
-            let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
+            // Collect body bytes
+            let body_bytes = match req.into_body().collect().await {
+                Ok(collected) => collected.to_bytes(),
+                Err(_) => {
+                    let response = ErrorResponse {
+                        error: "Failed to read request body".to_string(),
+                    };
+                    return json_response(StatusCode::BAD_REQUEST, &response);
+                }
+            };
+
             match serde_json::from_slice::<SetIpRequest>(&body_bytes) {
                 Ok(set_req) => match set_req.ip.parse::<Ipv6Addr>() {
                     Ok(new_ip) => {
@@ -147,31 +211,31 @@ async fn handle_request(
                             let response = ErrorResponse {
                                 error: "IP address is not within the configured subnet".to_string(),
                             };
-                            return Ok(json_response(StatusCode::BAD_REQUEST, &response));
+                            return json_response(StatusCode::BAD_REQUEST, &response);
                         }
 
                         {
                             let mut ip = state.write().await;
                             *ip = new_ip;
                         }
-                        println!("Set stable IPv6 to: {}", new_ip);
+                        println!("Set stable IPv6 to: {new_ip}");
                         let response = IpResponse {
                             ip: new_ip.to_string(),
                         };
-                        Ok(json_response(StatusCode::OK, &response))
+                        json_response(StatusCode::OK, &response)
                     }
                     Err(_) => {
                         let response = ErrorResponse {
                             error: "Invalid IPv6 address format".to_string(),
                         };
-                        Ok(json_response(StatusCode::BAD_REQUEST, &response))
+                        json_response(StatusCode::BAD_REQUEST, &response)
                     }
                 },
                 Err(_) => {
                     let response = ErrorResponse {
                         error: "Invalid JSON body. Expected: {\"ip\": \"...\"}".to_string(),
                     };
-                    Ok(json_response(StatusCode::BAD_REQUEST, &response))
+                    json_response(StatusCode::BAD_REQUEST, &response)
                 }
             }
         }
@@ -181,22 +245,22 @@ async fn handle_request(
                 error: "Not found. Available endpoints: GET /ip, POST /rotate, POST /set"
                     .to_string(),
             };
-            Ok(json_response(StatusCode::NOT_FOUND, &response))
+            json_response(StatusCode::NOT_FOUND, &response)
         }
     }
 }
 
-fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Body> {
+fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<ResponseBody> {
     let json = match serde_json::to_string(body) {
         Ok(json) => json,
         Err(e) => {
-            eprintln!("Failed to serialize JSON response: {}", e);
+            eprintln!("Failed to serialize JSON response: {e}");
             "{}".to_string()
         }
     };
     Response::builder()
         .status(status)
         .header("Content-Type", "application/json")
-        .body(Body::from(json))
+        .body(full(json))
         .unwrap()
 }
