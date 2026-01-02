@@ -165,6 +165,7 @@ impl BiliproxyState {
         (format!("https://api.bilibili.com{path}"), should_sign)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn do_proxy_request(
         &self,
         pool_index: usize,
