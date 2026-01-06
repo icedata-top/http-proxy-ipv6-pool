@@ -113,4 +113,18 @@ impl Ipv6Pool {
             println!("🔄 Rotated pool slot {idx} to new IP: {ip}");
         }
     }
+
+    /// Create a one-time random client (not from the pool).
+    /// Used for WBI-signed requests to avoid pool pollution.
+    pub fn create_random_client(&self) -> (reqwest::Client, String) {
+        let ip = generate_random_ipv6(self.ipv6_base, self.prefix_len);
+        let ua = random_user_agent();
+        let client = reqwest::Client::builder()
+            .local_address(IpAddr::V6(ip))
+            .timeout(self.timeout)
+            .build()
+            .expect("Failed to create client");
+        println!("🎲 Created one-time random client: {ip}");
+        (client, ua)
+    }
 }
