@@ -74,10 +74,10 @@ impl Ipv6Pool {
     }
 
     /// Get the client at a specific index (returns cloned values)
-    pub fn get_client_by_index(&self, index: usize) -> (reqwest::Client, String) {
-        let clients = self.clients.read();
-        (clients[index].0.clone(), clients[index].1.clone())
-    }
+    /// pub fn get_client_by_index(&self, index: usize) -> (reqwest::Client, String) {
+    ///     let clients = self.clients.read();
+    ///     (clients[index].0.clone(), clients[index].1.clone())
+    /// }
 
     /// Force rotate the client at the specified index (used when a request fails)
     /// Returns the new (client, user_agent) pair
