@@ -33,7 +33,12 @@ impl BiliproxyState {
     }
 
     /// Proxy a cover image request
-    pub async fn proxy_cover(&self, filename: &str) -> Result<Response<ResponseBody>, String> {
+    ///
+    /// Returns: (Response, upload_bytes, download_bytes)
+    pub async fn proxy_cover(
+        &self,
+        filename: &str,
+    ) -> Result<(Response<ResponseBody>, u64, u64), String> {
         let target_url = format!("https://i0.hdslb.com/bfs/archive/{filename}");
         let dede_user_id = random_dede_user_id();
         let dede_ck_md5 = random_dede_ck_md5();
@@ -58,6 +63,9 @@ impl BiliproxyState {
             .await
             .map_err(|e| format!("Failed to read cover body: {e}"))?;
 
+        // Cover requests are GET only, no upload body
+        let download_bytes = body.len() as u64;
+
         println!("Cover: {} - {}", status.as_u16(), filename);
 
         let mut builder =
@@ -78,9 +86,11 @@ impl BiliproxyState {
             .header(ACCESS_CONTROL_ALLOW_METHODS, "GET, OPTIONS");
 
         self.ipv6_pool.maybe_rotate();
-        builder
+        let response = builder
             .body(full(body))
-            .map_err(|e| format!("Failed to build cover response: {e}"))
+            .map_err(|e| format!("Failed to build cover response: {e}"))?;
+
+        Ok((response, 0, download_bytes))
     }
 
     /// Proxy a generic request (with retry logic and bound-retry rotation)
@@ -88,6 +98,8 @@ impl BiliproxyState {
     /// Client selection strategy:
     /// - If WBI signing is required: use a one-time random client (not from pool)
     /// - Otherwise: use a client from the 16-slot pool
+    ///
+    /// Returns: (Response, upload_bytes, download_bytes)
     pub async fn proxy_request(
         &self,
         method: &Method,
@@ -95,7 +107,8 @@ impl BiliproxyState {
         query_params: HashMap<String, String>,
         body: Vec<u8>,
         incoming_cookie: Option<String>,
-    ) -> Result<Response<ResponseBody>, String> {
+    ) -> Result<(Response<ResponseBody>, u64, u64), String> {
+        let upload_bytes = body.len() as u64;
         let (target_url, should_sign) = self.determine_target(path);
 
         // Choose client based on whether WBI signing is needed
@@ -126,11 +139,11 @@ impl BiliproxyState {
                 .await;
 
             match result {
-                Ok(response) => {
+                Ok((response, download_bytes)) => {
                     let status = response.status();
                     if status == StatusCode::OK || status == StatusCode::NOT_FOUND {
                         self.ipv6_pool.maybe_rotate();
-                        return Ok(response);
+                        return Ok((response, upload_bytes, download_bytes));
                     }
 
                     if attempt < MAX_RETRIES {
@@ -161,7 +174,7 @@ impl BiliproxyState {
                     }
 
                     self.ipv6_pool.maybe_rotate();
-                    return Ok(response);
+                    return Ok((response, upload_bytes, download_bytes));
                 }
                 Err(e) => {
                     if attempt < MAX_RETRIES {
@@ -192,7 +205,7 @@ impl BiliproxyState {
         }
 
         self.ipv6_pool.maybe_rotate();
-        Err("Max retries exceeded".to_string())
+        Err("Max retries exceeded".into())
     }
 
     fn determine_target(&self, path: &str) -> (String, bool) {
@@ -211,6 +224,7 @@ impl BiliproxyState {
         (format!("https://api.bilibili.com{path}"), should_sign)
     }
 
+    /// Returns: (Response, download_bytes)
     #[allow(clippy::too_many_arguments)]
     async fn do_proxy_request(
         &self,
@@ -222,7 +236,7 @@ impl BiliproxyState {
         body: &[u8],
         should_sign: bool,
         incoming_cookie: Option<&str>,
-    ) -> Result<Response<ResponseBody>, String> {
+    ) -> Result<(Response<ResponseBody>, u64), String> {
         let referer = if let Some(bvid) = query_params.get("bvid") {
             format!("https://www.bilibili.com/video/{bvid}")
         } else if let Some(avid) = query_params.get("avid") {
@@ -287,6 +301,8 @@ impl BiliproxyState {
             .await
             .map_err(|e| format!("Failed to read response body: {e}"))?;
 
+        let download_bytes = response_body.len() as u64;
+
         println!("{} - {}", status.as_u16(), target_url);
 
         let mut builder =
@@ -313,8 +329,10 @@ impl BiliproxyState {
                 "Origin, X-Requested-With, Content-Type, Accept, Authorization",
             );
 
-        builder
+        let response = builder
             .body(full(response_body))
-            .map_err(|e| format!("Failed to build response: {e}"))
+            .map_err(|e| format!("Failed to build response: {e}"))?;
+
+        Ok((response, download_bytes))
     }
 }

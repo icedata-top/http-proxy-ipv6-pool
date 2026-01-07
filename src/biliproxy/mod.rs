@@ -182,7 +182,11 @@ async fn handle_request_inner(
         (Method::GET, p) if p.starts_with("/cover/") => {
             let filename = p.strip_prefix("/cover/").unwrap_or("");
             match state.proxy_cover(filename).await {
-                Ok(response) => response,
+                Ok((response, upload_bytes, download_bytes)) => {
+                    crate::metrics::record_proxy_bandwidth("upload", "biliproxy", upload_bytes);
+                    crate::metrics::record_proxy_bandwidth("download", "biliproxy", download_bytes);
+                    response
+                }
                 Err(e) => json_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     &ErrorResponse {
@@ -213,7 +217,11 @@ async fn handle_request_inner(
                 .proxy_request(&method, &path, query_params, body_bytes, incoming_cookie)
                 .await
             {
-                Ok(response) => response,
+                Ok((response, upload_bytes, download_bytes)) => {
+                    crate::metrics::record_proxy_bandwidth("upload", "biliproxy", upload_bytes);
+                    crate::metrics::record_proxy_bandwidth("download", "biliproxy", download_bytes);
+                    response
+                }
                 Err(e) => json_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     &ErrorResponse {

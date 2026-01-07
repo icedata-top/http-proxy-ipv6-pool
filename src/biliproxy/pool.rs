@@ -78,7 +78,6 @@ impl Ipv6Pool {
     ///     let clients = self.clients.read();
     ///     (clients[index].0.clone(), clients[index].1.clone())
     /// }
-
     /// Force rotate the client at the specified index (used when a request fails)
     /// Returns the new (client, user_agent) pair
     pub fn force_rotate(&self, index: usize) -> (reqwest::Client, String) {
