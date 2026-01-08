@@ -1,19 +1,25 @@
-use hyper::{
-    Body, Client, Method, Request, Response, Server, StatusCode,
-    client::HttpConnector,
+use bytes::Bytes;
+use http::{
+    Method, Request, Response, StatusCode,
     header::{HeaderValue, PROXY_AUTHENTICATE},
-    server::conn::AddrStream,
-    service::{make_service_fn, service_fn},
+};
+use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
+use hyper::{
+    body::Incoming, server::conn::http1 as server_http1, service::service_fn, upgrade::Upgraded,
+};
+use hyper_util::{
+    client::legacy::{Client, connect::HttpConnector},
+    rt::{TokioExecutor, TokioIo},
 };
 use rand::Rng;
 use std::{
+    convert::Infallible,
     io::{Error as IoError, ErrorKind},
     net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs},
     sync::Arc,
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    net::TcpSocket,
+    net::{TcpListener, TcpSocket},
     sync::RwLock,
 };
 
@@ -22,35 +28,62 @@ use crate::auth;
 /// Shared state for the stable IPv6 address
 pub type StableIpv6State = Arc<RwLock<Ipv6Addr>>;
 
+/// Body type alias for responses
+type ResponseBody = BoxBody<Bytes, hyper::Error>;
+
+/// Create an empty response body
+fn empty() -> ResponseBody {
+    Empty::<Bytes>::new()
+        .map_err(|never| match never {})
+        .boxed()
+}
+
+/// Create a full response body from bytes
+fn full<T: Into<Bytes>>(chunk: T) -> ResponseBody {
+    Full::new(chunk.into())
+        .map_err(|never| match never {})
+        .boxed()
+}
+
 pub async fn start_proxy(
     listen_addr: SocketAddr,
     (ipv6, prefix_len): (Ipv6Addr, u8),
     username: String,
     password: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let make_service = make_service_fn(move |_: &AddrStream| {
+    let listener = TcpListener::bind(listen_addr).await?;
+    println!("Random proxy listening on {listen_addr}");
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let io = TokioIo::new(stream);
         let username = username.clone();
         let password = password.clone();
-        async move {
-            Ok::<_, hyper::Error>(service_fn(move |req| {
-                let proxy = Proxy {
-                    ipv6: ipv6.into(),
-                    prefix_len,
-                    username: username.clone(),
-                    password: password.clone(),
-                };
-                proxy.proxy(req)
-            }))
-        }
-    });
 
-    println!("Random proxy listening on {}", listen_addr);
-    Server::bind(&listen_addr)
-        .http1_preserve_header_case(true)
-        .http1_title_case_headers(true)
-        .serve(make_service)
-        .await
-        .map_err(|err| err.into())
+        tokio::spawn(async move {
+            let proxy = Proxy {
+                ipv6: ipv6.into(),
+                prefix_len,
+                username,
+                password,
+            };
+
+            let service = service_fn(move |req| {
+                let proxy = proxy.clone();
+                async move { proxy.proxy(req).await }
+            });
+
+            if let Err(err) = server_http1::Builder::new()
+                .preserve_header_case(true)
+                .title_case_headers(true)
+                .serve_connection(io, service)
+                .with_upgrades()
+                .await
+            {
+                eprintln!("Connection error: {err}");
+            }
+        });
+    }
 }
 
 #[derive(Clone)]
@@ -62,8 +95,10 @@ pub(crate) struct Proxy {
 }
 
 impl Proxy {
-    pub(crate) async fn proxy(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
-        // Use hyper constant via shared auth module
+    pub(crate) async fn proxy(
+        self,
+        req: Request<Incoming>,
+    ) -> Result<Response<ResponseBody>, Infallible> {
         if !auth::authenticate_proxy_authorization(&req, &self.username, &self.password) {
             return Ok(Response::builder()
                 .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
@@ -71,7 +106,7 @@ impl Proxy {
                     PROXY_AUTHENTICATE,
                     HeaderValue::from_static("Basic realm=\"Proxy\""),
                 )
-                .body(Body::empty())
+                .body(empty())
                 .unwrap());
         }
 
@@ -82,51 +117,71 @@ impl Proxy {
         }
     }
 
-    async fn process_connect(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+    async fn process_connect(
+        self,
+        req: Request<Incoming>,
+    ) -> Result<Response<ResponseBody>, Infallible> {
+        let remote_addr = match req.uri().authority() {
+            Some(auth) => auth.to_string(),
+            None => {
+                eprintln!("CONNECT request missing authority");
+                crate::metrics::record_proxy_connection("random", false);
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(full("CONNECT missing authority"))
+                    .unwrap());
+            }
+        };
+
+        crate::metrics::record_proxy_connection("random", true);
+
         tokio::task::spawn(async move {
-            let remote_addr = match req.uri().authority() {
-                Some(auth) => auth.to_string(),
-                None => {
-                    eprintln!("CONNECT request missing authority");
-                    return;
-                }
-            };
             match hyper::upgrade::on(req).await {
-                Ok(mut upgraded) => {
-                    if let Err(e) = self.tunnel(&mut upgraded, remote_addr).await {
-                        eprintln!("Tunnel error: {}", e);
+                Ok(upgraded) => {
+                    if let Err(e) = self.tunnel(upgraded, remote_addr).await {
+                        eprintln!("Tunnel error: {e}");
                     }
                 }
                 Err(e) => {
-                    eprintln!("Upgrade error: {}", e);
+                    eprintln!("Upgrade error: {e}");
                 }
             }
         });
-        Ok(Response::new(Body::empty()))
+
+        Ok(Response::new(empty()))
     }
 
-    async fn process_request(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+    async fn process_request(
+        self,
+        req: Request<Incoming>,
+    ) -> Result<Response<ResponseBody>, Infallible> {
         let bind_addr = get_rand_ipv6(self.ipv6, self.prefix_len);
-        let mut http = HttpConnector::new();
-        http.set_local_address(Some(bind_addr));
+        let mut http_connector = HttpConnector::new();
+        http_connector.set_local_address(Some(bind_addr));
         println!("{} via {bind_addr}", req.uri().host().unwrap_or_default());
 
-        let client = Client::builder()
+        let client: Client<HttpConnector, Incoming> = Client::builder(TokioExecutor::new())
             .http1_title_case_headers(true)
             .http1_preserve_header_case(true)
-            .build(http);
-        let res = client.request(req).await?;
-        Ok(res)
+            .build(http_connector);
+
+        match client.request(req).await {
+            Ok(res) => Ok(res.map(|b| b.boxed())),
+            Err(e) => {
+                eprintln!("Client error: {e}");
+                Ok(Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(full(format!("Proxy error: {e}")))
+                    .unwrap())
+            }
+        }
     }
 
-    async fn tunnel<A>(self, upgraded: &mut A, addr_str: String) -> std::io::Result<()>
-    where
-        A: AsyncRead + AsyncWrite + Unpin + ?Sized,
-    {
+    async fn tunnel(self, upgraded: Upgraded, addr_str: String) -> std::io::Result<()> {
         let addrs = match addr_str.to_socket_addrs() {
             Ok(addrs) => addrs,
             Err(e) => {
-                eprintln!("Failed to resolve {}: {}", addr_str, e);
+                eprintln!("Failed to resolve {addr_str}: {e}");
                 return Err(e);
             }
         };
@@ -137,15 +192,20 @@ impl Proxy {
             if socket.bind(bind_addr).is_ok() {
                 println!("{addr_str} via {bind_addr}");
                 if let Ok(mut server) = socket.connect(addr).await {
-                    tokio::io::copy_bidirectional(upgraded, &mut server).await?;
-                    return Ok(());
+                    let mut upgraded = TokioIo::new(upgraded);
+                    let result = tokio::io::copy_bidirectional(&mut upgraded, &mut server).await;
+                    if let Ok((upload, download)) = result {
+                        crate::metrics::record_proxy_bandwidth("upload", "random", upload);
+                        crate::metrics::record_proxy_bandwidth("download", "random", download);
+                    }
+                    return result.map(|_| ());
                 }
             }
         }
 
         Err(IoError::new(
             ErrorKind::ConnectionRefused,
-            format!("Failed to connect to {}", addr_str),
+            format!("Failed to connect to {addr_str}"),
         ))
     }
 }
@@ -179,29 +239,39 @@ pub async fn start_stable_proxy(
     username: String,
     password: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let make_service = make_service_fn(move |_: &AddrStream| {
+    let listener = TcpListener::bind(listen_addr).await?;
+    println!("Stable proxy listening on {listen_addr}");
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let io = TokioIo::new(stream);
         let state = state.clone();
         let username = username.clone();
         let password = password.clone();
-        async move {
-            Ok::<_, hyper::Error>(service_fn(move |req| {
-                let proxy = StableProxy {
-                    state: state.clone(),
-                    username: username.clone(),
-                    password: password.clone(),
-                };
-                proxy.proxy(req)
-            }))
-        }
-    });
 
-    println!("Stable proxy listening on {}", listen_addr);
-    Server::bind(&listen_addr)
-        .http1_preserve_header_case(true)
-        .http1_title_case_headers(true)
-        .serve(make_service)
-        .await
-        .map_err(|e| e.into())
+        tokio::spawn(async move {
+            let proxy = StableProxy {
+                state,
+                username,
+                password,
+            };
+
+            let service = service_fn(move |req| {
+                let proxy = proxy.clone();
+                async move { proxy.proxy(req).await }
+            });
+
+            if let Err(err) = server_http1::Builder::new()
+                .preserve_header_case(true)
+                .title_case_headers(true)
+                .serve_connection(io, service)
+                .with_upgrades()
+                .await
+            {
+                eprintln!("[stable] Connection error: {err}");
+            }
+        });
+    }
 }
 
 #[derive(Clone)]
@@ -212,8 +282,7 @@ struct StableProxy {
 }
 
 impl StableProxy {
-    async fn proxy(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
-        // Use hyper constant via shared auth module
+    async fn proxy(self, req: Request<Incoming>) -> Result<Response<ResponseBody>, Infallible> {
         if !auth::authenticate_proxy_authorization(&req, &self.username, &self.password) {
             return Ok(Response::builder()
                 .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
@@ -221,7 +290,7 @@ impl StableProxy {
                     PROXY_AUTHENTICATE,
                     HeaderValue::from_static("Basic realm=\"Proxy\""),
                 )
-                .body(Body::empty())
+                .body(empty())
                 .unwrap());
         }
 
@@ -232,62 +301,80 @@ impl StableProxy {
         }
     }
 
-    async fn process_connect(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+    async fn process_connect(
+        self,
+        req: Request<Incoming>,
+    ) -> Result<Response<ResponseBody>, Infallible> {
         let stable_ip = *self.state.read().await;
+        let remote_addr = match req.uri().authority() {
+            Some(auth) => auth.to_string(),
+            None => {
+                eprintln!("[stable] CONNECT request missing authority");
+                crate::metrics::record_proxy_connection("stable", false);
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(full("CONNECT missing authority"))
+                    .unwrap());
+            }
+        };
+
+        crate::metrics::record_proxy_connection("stable", true);
+
         tokio::task::spawn(async move {
-            let remote_addr = match req.uri().authority() {
-                Some(auth) => auth.to_string(),
-                None => {
-                    eprintln!("[stable] CONNECT request missing authority");
-                    return;
-                }
-            };
             match hyper::upgrade::on(req).await {
-                Ok(mut upgraded) => {
-                    if let Err(e) =
-                        Self::tunnel_with_ip(&mut upgraded, remote_addr, stable_ip).await
-                    {
-                        eprintln!("[stable] Tunnel error: {}", e);
+                Ok(upgraded) => {
+                    if let Err(e) = Self::tunnel_with_ip(upgraded, remote_addr, stable_ip).await {
+                        eprintln!("[stable] Tunnel error: {e}");
                     }
                 }
                 Err(e) => {
-                    eprintln!("[stable] Upgrade error: {}", e);
+                    eprintln!("[stable] Upgrade error: {e}");
                 }
             }
         });
-        Ok(Response::new(Body::empty()))
+
+        Ok(Response::new(empty()))
     }
 
-    async fn process_request(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+    async fn process_request(
+        self,
+        req: Request<Incoming>,
+    ) -> Result<Response<ResponseBody>, Infallible> {
         let stable_ip = *self.state.read().await;
         let bind_addr = IpAddr::V6(stable_ip);
-        let mut http = HttpConnector::new();
-        http.set_local_address(Some(bind_addr));
+        let mut http_connector = HttpConnector::new();
+        http_connector.set_local_address(Some(bind_addr));
         println!(
             "[stable] {} via {bind_addr}",
             req.uri().host().unwrap_or_default()
         );
 
-        let client = Client::builder()
+        let client: Client<HttpConnector, Incoming> = Client::builder(TokioExecutor::new())
             .http1_title_case_headers(true)
             .http1_preserve_header_case(true)
-            .build(http);
-        let res = client.request(req).await?;
-        Ok(res)
+            .build(http_connector);
+
+        match client.request(req).await {
+            Ok(res) => Ok(res.map(|b| b.boxed())),
+            Err(e) => {
+                eprintln!("[stable] Client error: {e}");
+                Ok(Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(full(format!("Proxy error: {e}")))
+                    .unwrap())
+            }
+        }
     }
 
-    async fn tunnel_with_ip<A>(
-        upgraded: &mut A,
+    async fn tunnel_with_ip(
+        upgraded: Upgraded,
         addr_str: String,
         stable_ip: Ipv6Addr,
-    ) -> std::io::Result<()>
-    where
-        A: AsyncRead + AsyncWrite + Unpin + ?Sized,
-    {
+    ) -> std::io::Result<()> {
         let addrs = match addr_str.to_socket_addrs() {
             Ok(addrs) => addrs,
             Err(e) => {
-                eprintln!("[stable] Failed to resolve {}: {}", addr_str, e);
+                eprintln!("[stable] Failed to resolve {addr_str}: {e}");
                 return Err(e);
             }
         };
@@ -298,15 +385,20 @@ impl StableProxy {
             if socket.bind(bind_addr).is_ok() {
                 println!("[stable] {addr_str} via {bind_addr}");
                 if let Ok(mut server) = socket.connect(addr).await {
-                    tokio::io::copy_bidirectional(upgraded, &mut server).await?;
-                    return Ok(());
+                    let mut upgraded = TokioIo::new(upgraded);
+                    let result = tokio::io::copy_bidirectional(&mut upgraded, &mut server).await;
+                    if let Ok((upload, download)) = result {
+                        crate::metrics::record_proxy_bandwidth("upload", "stable", upload);
+                        crate::metrics::record_proxy_bandwidth("download", "stable", download);
+                    }
+                    return result.map(|_| ());
                 }
             }
         }
 
         Err(IoError::new(
             ErrorKind::ConnectionRefused,
-            format!("[stable] Failed to connect to {}", addr_str),
+            format!("[stable] Failed to connect to {addr_str}"),
         ))
     }
 }

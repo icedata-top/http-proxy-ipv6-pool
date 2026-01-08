@@ -6,11 +6,15 @@ use std::{
 use tokio::sync::RwLock;
 
 mod auth;
+mod biliproxy;
 mod controller;
+mod metrics;
 mod proxy;
 
+shadow_rs::shadow!(build);
+
 #[derive(Parser, Debug)]
-#[command(name = "ipv6-proxy")]
+#[command(name = "ipv6-proxy", version = build::CLAP_LONG_VERSION, about = build::CLAP_LONG_VERSION)]
 struct Opt {
     /// Bind address for random proxy (e.g. 127.0.0.1:8080)
     #[arg(short = 'b', long = "bind", default_value = "127.0.0.1:8080")]
@@ -31,6 +35,14 @@ struct Opt {
     /// Proxy authentication in format username:password
     #[arg(short = 'a', long = "auth", value_parser = parse_auth)]
     auth: (String, String),
+
+    /// Bind address for biliproxy (optional, e.g. 127.0.0.1:3000)
+    #[arg(long = "biliproxy")]
+    biliproxy: Option<SocketAddr>,
+
+    /// Bind address for metrics server (optional, e.g. 127.0.0.1:9090)
+    #[arg(short = 'm', long = "metrics")]
+    metrics: Option<SocketAddr>,
 }
 
 fn parse_ipv6_cidr(s: &str) -> Result<(Ipv6Addr, u8), String> {
@@ -83,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stable_state: Option<proxy::StableIpv6State> =
         if opt.stable_bind.is_some() || opt.controller.is_some() {
             let initial_ip = controller::generate_random_ipv6(ipv6_base, prefix_len);
-            println!("Initial stable IPv6: {}", initial_ip);
+            println!("Initial stable IPv6: {initial_ip}");
             Some(Arc::new(RwLock::new(initial_ip)))
         } else {
             None
@@ -139,9 +151,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // Start biliproxy (optional)
+    let biliproxy_server = {
+        let biliproxy_addr = opt.biliproxy;
+        async move {
+            if let Some(addr) = biliproxy_addr {
+                biliproxy::start_biliproxy(addr, ipv6, prefix_len)
+                    .await
+                    .map_err(|e| e.to_string())
+            } else {
+                Ok(())
+            }
+        }
+    };
+
+    // Start metrics server (optional)
+    let metrics_server = {
+        let metrics_addr = opt.metrics;
+        async move {
+            if let Some(addr) = metrics_addr {
+                metrics::start_metrics_server(addr)
+                    .await
+                    .map_err(|e| e.to_string())
+            } else {
+                Ok(())
+            }
+        }
+    };
+
     // Run all services concurrently - use try_join for better error handling
     // This will return immediately when any service fails
-    tokio::try_join!(random_proxy, stable_proxy, controller_server)?;
+    tokio::try_join!(
+        random_proxy,
+        stable_proxy,
+        controller_server,
+        biliproxy_server,
+        metrics_server
+    )?;
 
     Ok(())
 }
