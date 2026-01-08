@@ -110,25 +110,12 @@ impl BiliproxyState {
     ) -> Result<(Response<ResponseBody>, u64, u64), String> {
         let upload_bytes = body.len() as u64;
         let (target_url, should_sign) = self.determine_target(path);
-
-        // Choose client based on whether WBI signing is needed
-        // WBI requests use one-time random clients to avoid pool pollution
-        let (initial_client, initial_ua, pool_idx) = if should_sign {
-            let (client, ua) = self.ipv6_pool.create_random_client();
-            (client, ua, None) // No pool index for one-time clients
-        } else {
-            let (client, ua, idx) = self.ipv6_pool.get_random_client();
-            (client, ua, Some(idx))
-        };
-
-        let mut current_client = initial_client;
-        let mut current_ua = initial_ua;
+        let (_, _, idx) = self.ipv6_pool.get_random_client();
 
         for attempt in 1..=MAX_RETRIES {
             let result = self
                 .do_proxy_request(
-                    &current_client,
-                    &current_ua,
+                    idx,
                     method,
                     &target_url,
                     &query_params,
@@ -147,29 +134,13 @@ impl BiliproxyState {
                     }
 
                     if attempt < MAX_RETRIES {
-                        // Retry with a new client
-                        if let Some(idx) = pool_idx {
-                            println!(
-                                "⚠️  Retry {}/{} - Status: {} - Rotating slot {idx}...",
-                                attempt,
-                                MAX_RETRIES - 1,
-                                status.as_u16()
-                            );
-                            let (new_client, new_ua) = self.ipv6_pool.force_rotate(idx);
-                            current_client = new_client;
-                            current_ua = new_ua;
-                        } else {
-                            // WBI request: create a new one-time client
-                            println!(
-                                "⚠️  Retry {}/{} - Status: {} - Creating new random client...",
-                                attempt,
-                                MAX_RETRIES - 1,
-                                status.as_u16()
-                            );
-                            let (new_client, new_ua) = self.ipv6_pool.create_random_client();
-                            current_client = new_client;
-                            current_ua = new_ua;
-                        }
+                        println!(
+                            "⚠️  Retry {}/{} - Status: {} - Rotating slot {idx}...",
+                            attempt,
+                            MAX_RETRIES - 1,
+                            status.as_u16()
+                        );
+                        self.ipv6_pool.force_rotate(idx);
                         continue;
                     }
 
@@ -178,25 +149,12 @@ impl BiliproxyState {
                 }
                 Err(e) => {
                     if attempt < MAX_RETRIES {
-                        if let Some(idx) = pool_idx {
-                            println!(
-                                "⚠️  Retry {}/{} - Error: {e} - Rotating slot {idx}...",
-                                attempt,
-                                MAX_RETRIES - 1
-                            );
-                            let (new_client, new_ua) = self.ipv6_pool.force_rotate(idx);
-                            current_client = new_client;
-                            current_ua = new_ua;
-                        } else {
-                            println!(
-                                "⚠️  Retry {}/{} - Error: {e} - Creating new random client...",
-                                attempt,
-                                MAX_RETRIES - 1
-                            );
-                            let (new_client, new_ua) = self.ipv6_pool.create_random_client();
-                            current_client = new_client;
-                            current_ua = new_ua;
-                        }
+                        println!(
+                            "⚠️  Retry {}/{} - Error: {e} - Rotating slot {idx}...",
+                            attempt,
+                            MAX_RETRIES - 1
+                        );
+                        self.ipv6_pool.force_rotate(idx);
                         continue;
                     }
                     return Err(e);
@@ -228,8 +186,7 @@ impl BiliproxyState {
     #[allow(clippy::too_many_arguments)]
     async fn do_proxy_request(
         &self,
-        client: &reqwest::Client,
-        user_agent: &str,
+        pool_index: usize,
         method: &Method,
         target_url: &str,
         query_params: &HashMap<String, String>,
@@ -249,9 +206,10 @@ impl BiliproxyState {
         };
 
         // Sign params if needed
+        let (client, user_agent) = self.ipv6_pool.get_client_by_index(pool_index);
         let final_params = if should_sign && *method == Method::GET {
             self.wbi_manager
-                .sign(query_params, client, user_agent)
+                .sign(query_params, &client, &user_agent)
                 .await?
         } else {
             query_params.clone()
