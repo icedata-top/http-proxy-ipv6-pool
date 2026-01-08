@@ -11,8 +11,10 @@ mod controller;
 mod metrics;
 mod proxy;
 
+shadow_rs::shadow!(build);
+
 #[derive(Parser, Debug)]
-#[command(name = "ipv6-proxy")]
+#[command(name = "ipv6-proxy", version = build::CLAP_LONG_VERSION, about = build::CLAP_LONG_VERSION)]
 struct Opt {
     /// Bind address for random proxy (e.g. 127.0.0.1:8080)
     #[arg(short = 'b', long = "bind", default_value = "127.0.0.1:8080")]

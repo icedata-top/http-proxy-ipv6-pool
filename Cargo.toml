@@ -35,7 +35,10 @@ hex = "0.4"
 urlencoding = "2"
 prometheus = { version = "0.14", features = ["process"] }
 ua_generator = { git = "https://github.com/spider-rs/ua_generator.git" }
+shadow-rs = "0.38"
 
+[build-dependencies]
+shadow-rs = "0.38"
 
 [profile.release]
 strip = true
